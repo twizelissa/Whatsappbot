@@ -1,0 +1,9 @@
+.env
+.baileys-auth/
+node_modules/
+dist/
+recordings/processed/
+.next/
+*.log
+*.tsbuildinfo
+.DS_Store

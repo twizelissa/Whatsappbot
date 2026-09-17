@@ -1,0 +1,17 @@
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+COPY packages/shared/package*.json ./packages/shared/
+COPY packages/transcription/package*.json ./packages/transcription/
+RUN npm ci --workspace=packages/shared --workspace=packages/transcription
+COPY packages/shared ./packages/shared
+COPY packages/transcription ./packages/transcription
+RUN npm run build --workspace=packages/shared --workspace=packages/transcription
+
+FROM node:20-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
+COPY --from=builder /app/packages/transcription/dist ./packages/transcription/dist
+CMD ["node", "packages/transcription/dist/index.js"]

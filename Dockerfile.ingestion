@@ -1,0 +1,17 @@
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+COPY packages/shared/package*.json ./packages/shared/
+COPY packages/ingestion/package*.json ./packages/ingestion/
+RUN npm ci --workspace=packages/shared --workspace=packages/ingestion
+COPY packages/shared ./packages/shared
+COPY packages/ingestion ./packages/ingestion
+RUN npm run build --workspace=packages/shared --workspace=packages/ingestion
+
+FROM node:20-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
+COPY --from=builder /app/packages/ingestion/dist ./packages/ingestion/dist
+CMD ["node", "packages/ingestion/dist/index.js"]

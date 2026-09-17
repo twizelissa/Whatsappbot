@@ -1,0 +1,30 @@
+{
+  "name": "unipods-whatsapp-bot",
+  "version": "1.0.0",
+  "description": "UniPods Hackathon — WhatsApp Group Memory Bot",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:ingestion\" \"npm run dev:answer\" \"npm run dev:scheduler\"",
+    "dev:ingestion": "npm run dev --workspace=packages/ingestion",
+    "dev:answer": "npm run dev --workspace=packages/answer",
+    "dev:scheduler": "npm run dev --workspace=packages/scheduler",
+    "dev:dashboard": "npm run dev --workspace=dashboard",
+    "build": "npm run build --workspaces",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint packages/ --ext .ts",
+    "migrate": "npm run migrate --workspace=packages/shared"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "concurrently": "^8.2.2",
+    "eslint": "^8.57.0",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  }
+}
