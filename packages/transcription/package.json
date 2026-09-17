@@ -15,12 +15,14 @@
     "chokidar": "^3.6.0",
     "express": "^4.19.2",
     "form-data": "^4.0.0",
+    "googleapis": "^144.0.0",
     "multer": "^1.4.5-lts.1",
     "node-fetch": "^3.3.2",
     "openai": "^4.52.7",
     "pino": "^9.3.2",
     "pino-pretty": "^11.2.2",
     "uuid": "^10.0.0"
+
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

@@ -5,6 +5,7 @@ import fs from 'fs';
 import getEnv from '@unipods/shared/src/config';
 import { transcribeAndIngest } from './transcriber';
 import { watchRecordingsDir } from './watcher';
+import { startGoogleMeetPoller } from './google-drive';
 import pino from 'pino';
 
 const logger = pino({ level: 'info', transport: { target: 'pino-pretty' } });
@@ -15,12 +16,15 @@ if (!fs.existsSync(RECORDINGS_DIR)) {
   fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
 }
 
-// Multer config for file uploads
+// Multer config for manual file uploads
 const upload = multer({
   dest: path.join(RECORDINGS_DIR, 'uploads'),
   limits: { fileSize: 500 * 1024 * 1024 }, // 500MB
   fileFilter: (_req, file, cb) => {
-    const allowed = ['audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/ogg', 'audio/webm', 'video/mp4', 'video/webm', 'audio/x-m4a'];
+    const allowed = [
+      'audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/ogg',
+      'audio/webm', 'video/mp4', 'video/webm', 'audio/x-m4a',
+    ];
     cb(null, allowed.includes(file.mimetype));
   },
 });
@@ -33,7 +37,8 @@ app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok', service: 'transcription', timestamp: new Date().toISOString() });
 });
 
-// Upload and transcribe endpoint
+// ── Manual upload endpoint ─────────────────────────────────────────────────────
+// Useful for one-off uploads or recordings that aren't in Google Drive
 app.post(
   '/transcribe',
   upload.single('file') as express.RequestHandler,
@@ -46,7 +51,6 @@ app.post(
     const callDate = req.body.call_date ? new Date(req.body.call_date) : new Date();
     const callId = req.body.call_id ?? path.basename(file.originalname, path.extname(file.originalname));
 
-    // Rename to proper extension
     const ext = path.extname(file.originalname);
     const renamedPath = file.path + ext;
     fs.renameSync(file.path, renamedPath);
@@ -55,7 +59,7 @@ app.post(
 
     try {
       const resultCallId = await transcribeAndIngest(renamedPath, callId, callDate);
-      fs.unlinkSync(renamedPath); // clean up
+      fs.unlinkSync(renamedPath);
       res.json({ success: true, call_id: resultCallId, message: 'Transcription complete and ingested' });
     } catch (err) {
       logger.error({ err }, 'Transcription failed');
@@ -65,7 +69,7 @@ app.post(
   }
 );
 
-// List processed transcripts
+// ── List processed transcripts ─────────────────────────────────────────────────
 app.get('/transcripts', async (_req: Request, res: Response) => {
   const { query } = await import('@unipods/shared/src/db');
   const rows = await query<{ call_id: string; created_at: Date; text: string }>(
@@ -76,13 +80,31 @@ app.get('/transcripts', async (_req: Request, res: Response) => {
   res.json(rows);
 });
 
-// Start watcher and server
-watchRecordingsDir(async (callId, filePath) => {
-  logger.info({ callId, filePath }, '🔔 Auto-recap triggered for new transcript');
-  // The scheduler service will pick this up via DB polling
-});
+// ── Startup ────────────────────────────────────────────────────────────────────
 
-const PORT = env.INGESTION_PORT + 1; // 3003
+const onTranscribed = async (callId: string) => {
+  logger.info({ callId }, '🔔 Transcript ready — scheduler will auto-recap');
+};
+
+// 1. Watch local recordings/ folder (manual drops or local meeting exports)
+watchRecordingsDir(async (callId) => onTranscribed(callId));
+
+// 2. Poll Google Drive for new Google Meet recordings (auto)
+//    Starts silently if credentials not set (logs a warning, doesn't crash)
+startGoogleMeetPoller({
+  pollIntervalMs: parseInt(process.env.GOOGLE_DRIVE_POLL_INTERVAL_MS ?? '300000'), // 5 min
+  folderId: process.env.GOOGLE_DRIVE_RECORDINGS_FOLDER_ID,
+  lookBackDays: 7,
+  onTranscribed: async (callId) => onTranscribed(callId),
+}).catch((err) => logger.error({ err }, '❌ Google Meet poller failed to start'));
+
+const PORT = env.INGESTION_PORT + 1; // 3003 by default
 app.listen(PORT, () => {
   logger.info(`🎙️ Transcription service running on port ${PORT}`);
+  logger.info(`   📁 Local folder watcher: ${RECORDINGS_DIR}`);
+  logger.info(`   ☁️  Google Meet poller: ${
+    process.env.GOOGLE_DRIVE_RECORDINGS_FOLDER_ID
+      ? `folder ${process.env.GOOGLE_DRIVE_RECORDINGS_FOLDER_ID}`
+      : 'full-drive search (set GOOGLE_DRIVE_RECORDINGS_FOLDER_ID to narrow it)'
+  }`);
 });
