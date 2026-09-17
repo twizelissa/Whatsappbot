@@ -5,12 +5,18 @@ const logger = pino({ level: 'info' });
 const WHATSAPP_API_BASE = 'https://graph.facebook.com/v20.0';
 
 export interface WhatsAppMessage {
-  from: string;           // sender's phone number
-  id: string;             // message ID
+  from: string;            // sender's phone number (DM) OR group JID (group msg)
+  id: string;              // message ID
   timestamp: string;
   text?: { body: string };
   type: string;
-  name?: string;
+  name?: string;           // sender display name
+  // Group-specific fields
+  group_id?: string;       // JID of the group (e.g. 120363xxxxxx@g.us)
+  sender_in_group?: string; // actual sender's phone within a group message
+  is_group?: boolean;
+  is_mention?: boolean;    // was the bot @mentioned?
+  clean_text?: string;     // text with @mention stripped out
 }
 
 export interface WhatsAppWebhookPayload {
@@ -22,7 +28,7 @@ export interface WhatsAppWebhookPayload {
         messaging_product: string;
         metadata: { display_phone_number: string; phone_number_id: string };
         contacts?: Array<{ profile: { name: string }; wa_id: string }>;
-        messages?: WhatsAppMessage[];
+        messages?: RawWAMessage[];
         statuses?: unknown[];
       };
       field: string;
@@ -30,8 +36,21 @@ export interface WhatsAppWebhookPayload {
   }>;
 }
 
+interface RawWAMessage {
+  from: string;
+  id: string;
+  timestamp: string;
+  text?: { body: string };
+  type: string;
+  context?: { from: string; id: string };
+  // Group mentions: when the bot is @mentioned, this contains mention data
+  mentions?: Array<{ wa_id: string }>;
+}
+
 /**
  * Send a text reply via WhatsApp Cloud API.
+ * Works for both DMs (toPhone = phone number) and group replies (toPhone = group JID).
+ * When replyToMsgId is set, the message threads under the original message.
  */
 export async function sendWhatsAppReply(
   toPhone: string,
@@ -44,9 +63,10 @@ export async function sendWhatsAppReply(
     messaging_product: 'whatsapp',
     to: toPhone,
     type: 'text',
-    text: { body: text.slice(0, 4096) }, // WA max is 4096 chars
+    text: { body: text.slice(0, 4096) }, // WA max 4096 chars
   };
 
+  // Threading: replies appear under the original message in the group
   if (replyToMsgId) {
     body.context = { message_id: replyToMsgId };
   }
@@ -69,7 +89,8 @@ export async function sendWhatsAppReply(
     throw new Error(`WhatsApp API error: ${JSON.stringify(error)}`);
   }
 
-  logger.info({ toPhone, textLen: text.length }, '✅ WhatsApp reply sent');
+  const isGroup = toPhone.includes('@g.us') || toPhone.includes('-');
+  logger.info({ toPhone, isGroup, textLen: text.length }, '✅ WhatsApp reply sent');
 }
 
 /**
@@ -96,10 +117,16 @@ export async function markAsRead(messageId: string): Promise<void> {
 }
 
 /**
- * Parse the webhook payload and extract messages.
+ * Parse the webhook payload.
+ *
+ * Handles both:
+ *   - Direct messages (from = sender phone)
+ *   - Group messages (from = group JID, with actual sender in contacts)
+ *
+ * For group messages, also detects @mention of the bot.
  */
 export function parseWebhookPayload(body: unknown): {
-  messages: (WhatsAppMessage & { senderName?: string })[];
+  messages: WhatsAppMessage[];
 } {
   const payload = body as WhatsAppWebhookPayload;
 
@@ -107,18 +134,68 @@ export function parseWebhookPayload(body: unknown): {
     return { messages: [] };
   }
 
-  const messages: (WhatsAppMessage & { senderName?: string })[] = [];
+  const env = getEnv();
+  const botPhone = env.WHATSAPP_PHONE_NUMBER_ID; // used to detect @mention
+  const messages: WhatsAppMessage[] = [];
 
   for (const entry of payload.entry ?? []) {
     for (const change of entry.changes ?? []) {
       if (change.field !== 'messages') continue;
 
-      const { messages: msgs, contacts } = change.value;
+      const { messages: msgs, contacts, metadata } = change.value;
       if (!msgs) continue;
 
       for (const msg of msgs) {
+        const isGroup = msg.from.includes('@g.us') || msg.from.includes('-');
         const contact = contacts?.find((c) => c.wa_id === msg.from);
-        messages.push({ ...msg, senderName: contact?.profile.name });
+        const senderName = contact?.profile.name;
+
+        if (isGroup) {
+          // Group message:
+          // msg.from = group JID (e.g. "120363xxxxxx@g.us")
+          // The actual sender is in contacts or msg.context
+          const text = msg.text?.body ?? '';
+
+          // Detect @mention of the bot number
+          // WhatsApp sends mentions as "@<phone>" or tagged in the text
+          const botDisplayPhone = metadata.display_phone_number.replace(/\D/g, '');
+          const isMentioned =
+            text.includes(`@${botDisplayPhone}`) ||
+            text.toLowerCase().includes('@bot') ||
+            (msg.mentions ?? []).some((m) => m.wa_id === botDisplayPhone);
+
+          // Strip the @mention from text so the LLM gets a clean question
+          const cleanText = text
+            .replace(new RegExp(`@${botDisplayPhone}`, 'g'), '')
+            .replace(/@bot/gi, '')
+            .trim();
+
+          messages.push({
+            from: msg.from,        // reply TO this (the group JID)
+            id: msg.id,
+            timestamp: msg.timestamp,
+            text: msg.text,
+            type: msg.type,
+            name: senderName,
+            group_id: msg.from,    // same as from for groups
+            is_group: true,
+            is_mention: isMentioned,
+            clean_text: cleanText || text,
+          });
+        } else {
+          // Direct message
+          messages.push({
+            from: msg.from,
+            id: msg.id,
+            timestamp: msg.timestamp,
+            text: msg.text,
+            type: msg.type,
+            name: senderName,
+            is_group: false,
+            is_mention: false,
+            clean_text: msg.text?.body,
+          });
+        }
       }
     }
   }
@@ -128,35 +205,40 @@ export function parseWebhookPayload(body: unknown): {
 
 /**
  * Format an answer response for WhatsApp.
- * Adds confidence indicator and source citations.
+ * In groups, prefix with sender's name so the reply is clearly addressed.
  */
 export function formatAnswerForWhatsApp(
   answer: string,
   confidence: string,
-  isDuplicate: boolean
+  isDuplicate: boolean,
+  opts: { isGroup?: boolean; senderName?: string } = {}
 ): string {
+  const { isGroup, senderName } = opts;
+
   let prefix = '';
   let suffix = '';
 
+  // In groups, address the person who asked
+  if (isGroup && senderName) {
+    prefix = `@${senderName}\n\n`;
+  }
+
   if (confidence === 'insufficient') {
-    prefix = '❓ ';
+    prefix += '❓ ';
   } else if (confidence === 'low') {
-    prefix = '⚠️ *Low confidence* — I found some related info but may not be complete:\n\n';
+    prefix += '⚠️ *Partial info* — I may not have the full picture:\n\n';
   }
 
   if (isDuplicate) {
-    suffix = '\n\n📌 _Note: This question was asked before — see above for when it was last discussed._';
+    suffix = '\n\n📌 _This was asked before — check earlier in the chat for more context._';
   }
 
   return prefix + answer + suffix;
 }
 
 /**
- * Typing indicator (sending status)
+ * Typing indicator — marks the message as read so the sender sees the bot is working.
  */
-export async function sendTypingIndicator(toPhone: string, messageId: string): Promise<void> {
-  const env = getEnv();
-
-  // Mark as read first (this triggers "read" receipt, implying we're processing)
+export async function sendTypingIndicator(_toPhone: string, messageId: string): Promise<void> {
   await markAsRead(messageId).catch(() => {}); // non-critical
 }

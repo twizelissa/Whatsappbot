@@ -11,6 +11,7 @@ import {
   sendWhatsAppReply,
   sendTypingIndicator,
   formatAnswerForWhatsApp,
+  WhatsAppMessage,
 } from './whatsapp';
 import pino from 'pino';
 
@@ -55,7 +56,7 @@ app.get('/webhook', (req: Request, res: Response) => {
 
 // ── WhatsApp webhook message handler ──────────────────────────
 app.post('/webhook', async (req: Request, res: Response) => {
-  // Always respond 200 immediately to Meta
+  // Always respond 200 immediately — Meta will retry if we take too long
   res.sendStatus(200);
 
   const { messages } = parseWebhookPayload(req.body);
@@ -64,15 +65,30 @@ app.post('/webhook', async (req: Request, res: Response) => {
   for (const msg of messages) {
     if (msg.type !== 'text' || !msg.text?.body) continue;
 
-    const question = msg.text.body.trim();
-    const userPhone = msg.from;
-    const userName = msg.senderName;
+    // ── Group message rules ────────────────────────────────────
+    if (msg.is_group) {
+      // In a group: ONLY respond when @mentioned
+      // (prevents the bot from answering every single message)
+      if (!msg.is_mention) {
+        logger.debug({ msgId: msg.id }, '📥 Group message received but bot not @mentioned — skipping');
+        continue;
+      }
+      logger.info({ group: msg.group_id, sender: msg.name }, '📣 Bot @mentioned in group');
+    } else {
+      logger.info({ from: msg.from, sender: msg.name }, '📩 DM received');
+    }
 
-    logger.info({ userPhone, userName, question }, '❓ Incoming question');
+    // Use clean_text (with @mention stripped) as the question
+    const question = (msg.clean_text ?? msg.text.body).trim();
+    if (!question) continue;
 
-    // Non-blocking: process and reply asynchronously
-    handleQuestion(question, userPhone, userName, msg.id).catch((err) => {
-      logger.error({ err, userPhone, question }, 'Failed to handle question');
+    // Reply destination:
+    // - Group message → reply to group JID (appears in the group chat)
+    // - DM          → reply to sender's phone number
+    const replyTo = msg.is_group ? msg.group_id! : msg.from;
+
+    handleQuestion(question, replyTo, msg.from, msg.name, msg.id, msg).catch((err) => {
+      logger.error({ err, replyTo, question }, 'Failed to handle question');
     });
   }
 });
@@ -80,20 +96,22 @@ app.post('/webhook', async (req: Request, res: Response) => {
 // ── Core Q&A handler ──────────────────────────────────────────
 async function handleQuestion(
   question: string,
-  userPhone: string,
-  userName: string | undefined,
-  messageId: string
+  replyTo: string,          // group JID or personal phone — WHERE to send the reply
+  senderPhone: string,      // who asked (for logging)
+  senderName: string | undefined,
+  messageId: string,
+  msg: WhatsAppMessage
 ): Promise<void> {
-  // 1. Acknowledge receipt
-  await sendTypingIndicator(userPhone, messageId);
+  // 1. Acknowledge (mark as read)
+  await sendTypingIndicator(replyTo, messageId);
 
-  // 2. Check freshness
+  // 2. Freshness check
   const lastSync = await getLastSyncTimestamp();
   const freshnessMins = lastSync
     ? (Date.now() - lastSync.getTime()) / 60000
     : null;
 
-  // 3. Check for duplicate question
+  // 3. Duplicate detection
   let isDuplicate = false;
   let duplicateContext: string | undefined;
 
@@ -113,34 +131,39 @@ async function handleQuestion(
     recencyBoost: true,
   });
 
-  logger.info({ chunksFound: chunks.length, topSim: chunks[0]?.similarity }, '🔍 Retrieval complete');
+  logger.info(
+    { chunksFound: chunks.length, topSim: chunks[0]?.similarity?.toFixed(3) },
+    '🔍 Retrieval complete'
+  );
 
-  // 5. Generate answer
+  // 5. Generate answer with Claude / GPT
   const answerResult = await generateAnswer(question, chunks, {
     isDuplicateQuestion: isDuplicate,
     duplicateContext,
     freshnessMins: freshnessMins ?? undefined,
-    userName,
+    userName: senderName,
   });
 
-  // 6. Format and send
+  // 6. Format for WhatsApp (group-aware — addresses sender by name in groups)
   const formattedAnswer = formatAnswerForWhatsApp(
     answerResult.answer,
     answerResult.confidence,
-    isDuplicate
+    isDuplicate,
+    { isGroup: msg.is_group, senderName: senderName }
   );
 
-  await sendWhatsAppReply(userPhone, formattedAnswer, messageId);
+  // 7. Send reply — to the GROUP if group message, to the person if DM
+  await sendWhatsAppReply(replyTo, formattedAnswer, messageId);
 
-  // 7. Log the answer
+  // 8. Log to DB (for dashboard)
   await query(
     `INSERT INTO answers (question, answer, user_phone, user_name, confidence, is_duplicate, sources, chunk_ids)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
     [
       question,
       answerResult.answer,
-      userPhone,
-      userName ?? null,
+      senderPhone,
+      senderName ?? null,
       answerResult.confidence,
       isDuplicate,
       JSON.stringify(answerResult.sources),
@@ -149,12 +172,17 @@ async function handleQuestion(
   );
 
   logger.info(
-    { userPhone, confidence: answerResult.confidence, isDuplicate },
+    {
+      replyTo,
+      isGroup: msg.is_group,
+      confidence: answerResult.confidence,
+      isDuplicate,
+    },
     '✅ Answer sent'
   );
 }
 
-// ── Manual Q&A endpoint (for testing without WhatsApp) ────────
+// ── Manual test endpoint (no WhatsApp needed) ─────────────────
 app.post('/ask', async (req: Request, res: Response) => {
   const { question, user_phone = 'test', user_name } = req.body;
 
@@ -189,7 +217,7 @@ app.post('/ask', async (req: Request, res: Response) => {
   });
 });
 
-// ── Stats endpoint (for dashboard) ───────────────────────────
+// ── Stats (for dashboard) ─────────────────────────────────────
 app.get('/stats', async (_req: Request, res: Response) => {
   const { queryOne } = await import('@unipods/shared/src/db');
   const stats = await queryOne<Record<string, unknown>>('SELECT get_bot_stats()');
@@ -215,7 +243,9 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 
 app.listen(env.ANSWER_SERVICE_PORT, () => {
   logger.info(`🤖 Answer service running on port ${env.ANSWER_SERVICE_PORT}`);
-  logger.info(`📬 Webhook URL: http://your-host:${env.ANSWER_SERVICE_PORT}/webhook`);
+  logger.info(`📬 Webhook: POST /webhook`);
+  logger.info(`   Group mode: @mention the bot in the group to trigger answers`);
+  logger.info(`   DM mode: message the bot number directly`);
 });
 
 export { app };
