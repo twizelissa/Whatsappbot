@@ -11,6 +11,7 @@ export interface Message {
   media_type: string | null;
   reply_to: string | null;
   group_id: string;
+  is_admin: boolean;           // true if sender was a group admin at time of message
   metadata: Record<string, unknown>;
 }
 
@@ -41,6 +42,7 @@ export interface ChunkMetadata {
   source_type: 'message' | 'transcript';
   call_id?: string;
   group_id?: string;
+  is_admin?: boolean;   // true if the original sender was a group admin
   has_been_answered?: boolean;
 }
 

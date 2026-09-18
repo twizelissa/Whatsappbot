@@ -1,10 +1,12 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import getEnv from './config';
 import { RetrievedChunk, AnswerResponse, SourceCitation, ChunkMetadata } from './types';
 
 let _anthropic: Anthropic | null = null;
 let _openai: OpenAI | null = null;
+let _gemini: GoogleGenerativeAI | null = null;
 
 function getAnthropic(): Anthropic {
   if (!_anthropic) {
@@ -22,19 +24,30 @@ function getOpenAI(): OpenAI {
   return _openai;
 }
 
-const SYSTEM_PROMPT = `You are UniPods Bot, an intelligent assistant for a WhatsApp group. 
-You have access to the group's chat history and call transcripts, and your job is to answer questions accurately based ONLY on the provided context.
+function getGemini(): GoogleGenerativeAI {
+  if (!_gemini) {
+    const env = getEnv();
+    if (!env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is not set');
+    _gemini = new GoogleGenerativeAI(env.GEMINI_API_KEY);
+  }
+  return _gemini;
+}
 
-Rules:
-1. ONLY answer based on the provided context chunks. Never invent or guess information.
-2. ALWAYS cite your sources with the format: "According to [sender/speaker] on [date]..."
-3. If the context is insufficient, stale, or you're not confident, say so explicitly: "I don't have enough information about this yet."
-4. If a question was asked before, mention this: "This was discussed before on [date]."
-5. Be concise and direct. Group chat users want quick answers.
-6. When citing calls, say "In the call on [date]..."
-7. Format your response for WhatsApp (no markdown headers, use emoji sparingly, keep it readable on mobile).
+const SYSTEM_PROMPT = `You are UniPods Bot (also known as UniPod Assistant), an intelligent AI assistant for this WhatsApp group and direct messages.
 
-Your tone: helpful, direct, professional but friendly.`;
+ABOUT YOU & YOUR CAPABILITIES:
+- You are designed to remember, organize, and search group chat history, shared links, opportunities, announcements, and call transcripts.
+- You answer questions based on past group messages, search for funding/project links, provide summaries of chat discussions, and recap Teams calls.
+- Users can mention you with @bot in a group or message you directly in a DM.
+
+RULES:
+1. GREETINGS & SELF-IDENTITY: If the user says hi/hello or asks who you are, what you do, how to use you, or about your capabilities, respond warmly and clearly explaining who you are and how you can help. DO NOT say "I don't have enough information" for greetings or meta questions about yourself.
+2. CONTEXT-BASED QUESTIONS: For questions about specific group topics, facts, links, or past discussions, answer using the provided context chunks. ALWAYS cite your sources ("According to [sender] on [date]...").
+3. ADMIN ANNOUNCEMENTS: When context is marked [ADMIN ANNOUNCEMENT], treat it as authoritative and prefix citation with "📢 Admin announcement from [name] on [date]:"
+4. INSUFFICIENT CONTEXT: If the user asks a specific question about group history/topics and the provided context doesn't contain the answer, politely state that you don't have that information in the group history yet.
+5. WHATSAPP FORMATTING: Format your response for WhatsApp (use *bold* for key terms, clear bullet points, clean emojis, no markdown headers). Keep responses readable on mobile.
+
+Tone: Friendly, clear, direct, and professional.`;
 
 export async function generateAnswer(
   question: string,
@@ -44,17 +57,22 @@ export async function generateAnswer(
     duplicateContext?: string;
     freshnessMins?: number;
     userName?: string;
+    conversationHistory?: string;
   } = {}
 ): Promise<AnswerResponse> {
   const env = getEnv();
 
-  const { isDuplicateQuestion = false, duplicateContext, freshnessMins, userName } = options;
+  const { isDuplicateQuestion = false, duplicateContext, freshnessMins, userName, conversationHistory } = options;
+
+  const isGreetingOrMeta = /^\s*(hi|hello|hey|greetings|good morning|good afternoon|good evening|who are you|what do you do|how to use you|what can you do|what are your features|what do you mean|help|who made you)/i.test(question);
 
   // Confidence assessment
   const topSimilarity = chunks[0]?.similarity ?? 0;
   let confidence: AnswerResponse['confidence'];
 
-  if (chunks.length === 0 || topSimilarity < 0.3) {
+  if (isGreetingOrMeta) {
+    confidence = 'high';
+  } else if (chunks.length === 0 || topSimilarity < 0.3) {
     confidence = 'insufficient';
   } else if (topSimilarity < env.LOW_CONFIDENCE_THRESHOLD) {
     confidence = 'low';
@@ -76,8 +94,17 @@ export async function generateAnswer(
       const meta = c.metadata as ChunkMetadata;
       const who = meta.sender_name ?? meta.speaker ?? meta.sender ?? 'Unknown';
       const when = meta.date ? new Date(meta.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : 'Unknown date';
-      const src = meta.source_type === 'transcript' ? `[CALL TRANSCRIPT - ${when}]` : `[MESSAGE from ${who} on ${when}]`;
-      return `--- Context ${i + 1} ${src} ---\n${c.text}`;
+
+      let srcLabel: string;
+      if (meta.source_type === 'transcript') {
+        srcLabel = `[TEAMS CALL TRANSCRIPT - ${when}]`;
+      } else if (meta.is_admin) {
+        srcLabel = `[ADMIN ANNOUNCEMENT from ${who} on ${when}]`;
+      } else {
+        srcLabel = `[MESSAGE from ${who} on ${when}]`;
+      }
+
+      return `--- Context ${i + 1} ${srcLabel} ---\n${c.text}`;
     })
     .join('\n\n');
 
@@ -87,16 +114,20 @@ export async function generateAnswer(
 
   const userContext = userName ? `The person asking is: ${userName}. ` : '';
 
-  const userPrompt = `${userContext}Question: ${question}
+  const historyBlock = conversationHistory && conversationHistory.trim()
+    ? `Recent Thread Conversation History:\n${conversationHistory}\n\n`
+    : '';
+
+  const userPrompt = `${userContext}${historyBlock}Current Question: ${question}
 
 Context from group history:
 ${contextStr}${duplicateNote}
 
-${confidence === 'insufficient' ? 'Note: Very little relevant context was found. Please indicate this in your answer.' : ''}
+${confidence === 'insufficient' ? 'Note: Very little relevant context was found for this specific question. Please indicate this politely if asking for specific group facts.' : ''}
 ${confidence === 'low' ? 'Note: The context found is not very specific to this question. Be appropriately cautious.' : ''}
 ${freshnessMins && freshnessMins > 60 ? `Note: The last sync was ${Math.round(freshnessMins)} minutes ago; very recent messages may not be indexed yet.` : ''}
 
-Please answer the question based on the context above.`;
+Please answer the question based on the thread conversation history and context above.`;
 
   let answer: string;
 
@@ -108,6 +139,33 @@ Please answer the question based on the context above.`;
       messages: [{ role: 'user', content: userPrompt }],
     });
     answer = msg.content[0].type === 'text' ? msg.content[0].text : '';
+  } else if (env.LLM_PROVIDER === 'gemini') {
+    const candidateModels = Array.from(
+      new Set([env.LLM_MODEL, 'gemini-3.5-flash-lite', 'gemini-2.5-flash'])
+    );
+    let lastError: unknown = null;
+    let success = false;
+    answer = '';
+
+    for (const modelName of candidateModels) {
+      try {
+        const model = getGemini().getGenerativeModel({
+          model: modelName,
+          systemInstruction: SYSTEM_PROMPT,
+        });
+        const result = await model.generateContent(userPrompt);
+        answer = result.response.text();
+        success = true;
+        break;
+      } catch (err) {
+        lastError = err;
+        console.warn(`⚠️ Gemini model ${modelName} failed, attempting fallback...`);
+      }
+    }
+
+    if (!success) {
+      throw lastError;
+    }
   } else {
     const completion = await getOpenAI().chat.completions.create({
       model: env.LLM_MODEL,
@@ -182,6 +240,13 @@ Keep it brief and scannable. Format for WhatsApp (no markdown headers).`;
       messages: [{ role: 'user', content: prompt }],
     });
     return msg.content[0].type === 'text' ? msg.content[0].text : '';
+  } else if (env.LLM_PROVIDER === 'gemini') {
+    const model = getGemini().getGenerativeModel({
+      model: env.LLM_MODEL,
+      systemInstruction: 'You are a helpful group chat digest creator. Be concise and scannable.',
+    });
+    const result = await model.generateContent(prompt);
+    return result.response.text();
   } else {
     const completion = await getOpenAI().chat.completions.create({
       model: env.LLM_MODEL,
@@ -233,6 +298,13 @@ Format for WhatsApp. Be brief.`;
       messages: [{ role: 'user', content: prompt }],
     });
     return msg.content[0].type === 'text' ? msg.content[0].text : '';
+  } else if (env.LLM_PROVIDER === 'gemini') {
+    const model = getGemini().getGenerativeModel({
+      model: env.LLM_MODEL,
+      systemInstruction: 'You are creating a call recap for a WhatsApp group. Be concise.',
+    });
+    const result = await model.generateContent(prompt);
+    return result.response.text();
   } else {
     const completion = await getOpenAI().chat.completions.create({
       model: env.LLM_MODEL,

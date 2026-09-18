@@ -29,35 +29,39 @@ export async function ingestMessage(msg: Omit<Message, 'id'>): Promise<string> {
 
   // 2. Embed if there's text content
   if (msg.text && msg.text.trim().length > 0) {
-    const text = msg.text.trim();
-    // For short messages, don't chunk — embed whole
-    const chunks =
-      text.split(/\s+/).length > 100
-        ? chunkText(text, 300, 30)
-        : [{ text, startIdx: 0, endIdx: text.length }];
+    try {
+      const text = msg.text.trim();
+      // For short messages, don't chunk — embed whole
+      const chunks =
+        text.split(/\s+/).length > 100
+          ? chunkText(text, 300, 30)
+          : [{ text, startIdx: 0, endIdx: text.length }];
 
-    for (const chunk of chunks) {
-      const embedding = await embedOne(chunk.text);
-      const metadata: ChunkMetadata = {
-        date: msg.timestamp.toISOString(),
-        sender: msg.sender,
-        sender_name: msg.sender_name,
-        source_type: 'message',
-        group_id: msg.group_id,
-      };
+      for (const chunk of chunks) {
+        const embedding = await embedOne(chunk.text);
+        const metadata: ChunkMetadata = {
+          date: msg.timestamp.toISOString(),
+          sender: msg.sender,
+          sender_name: msg.sender_name,
+          source_type: 'message',
+          group_id: msg.group_id,
+        };
 
-      await query(
-        `INSERT INTO chunks (id, source_id, source_type, text, embedding, metadata)
-         VALUES ($1, $2, $3, $4, $5::vector, $6)`,
-        [
-          uuidv4(),
-          messageId,
-          'message',
-          chunk.text,
-          toVectorString(embedding),
-          JSON.stringify(metadata),
-        ]
-      );
+        await query(
+          `INSERT INTO chunks (id, source_id, source_type, text, embedding, metadata)
+           VALUES ($1, $2, $3, $4, $5::vector, $6)`,
+          [
+            uuidv4(),
+            messageId,
+            'message',
+            chunk.text,
+            toVectorString(embedding),
+            JSON.stringify(metadata),
+          ]
+        );
+      }
+    } catch (err) {
+      console.error('⚠️ Could not generate embedding for message:', err);
     }
   }
 

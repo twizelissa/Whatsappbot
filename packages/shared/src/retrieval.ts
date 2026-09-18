@@ -239,3 +239,66 @@ export async function getLastSyncTimestamp(): Promise<Date | null> {
   const latest = rows[0]?.latest;
   return latest ? new Date(latest) : null;
 }
+
+/**
+ * Retrieves the most recent chunks from the database (for summary requests).
+ */
+export async function getRecentChunks(
+  groupId?: string,
+  limit = 30
+): Promise<RetrievedChunk[]> {
+  const conditions: string[] = ["text != ''"];
+  const params: unknown[] = [limit];
+  let paramIdx = 2;
+
+  if (groupId) {
+    conditions.push(`metadata->>'group_id' = $${paramIdx++}`);
+    params.push(groupId);
+  }
+
+  const whereClause = `WHERE ${conditions.join(' AND ')}`;
+
+  const rows = await query<RetrievedChunk>(
+    `SELECT id, source_id, source_type, text, metadata, created_at
+     FROM chunks
+     ${whereClause}
+     ORDER BY created_at DESC
+     LIMIT $1`,
+    params
+  );
+
+  // Reverse so they are in chronological order
+  return rows.reverse().map((r) => ({
+    ...r,
+    similarity: 0.9,
+    metadata: typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata,
+  }));
+}
+
+/**
+ * Retrieves the last N messages/answers for a specific group/DM JID to provide multi-turn conversation memory.
+ */
+export async function getRecentThreadHistory(
+  jid: string,
+  limit = 6
+): Promise<string> {
+  const rows = await query<{ text: string; metadata: ChunkMetadata; created_at: string }>(
+    `SELECT text, metadata, created_at
+     FROM chunks
+     WHERE metadata->>'group_id' = $1 OR metadata->>'jid' = $1
+     ORDER BY created_at DESC
+     LIMIT $2`,
+    [jid, limit]
+  );
+
+  if (!rows || rows.length === 0) return '';
+
+  return rows
+    .reverse()
+    .map((r) => {
+      const meta = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata;
+      const sender = meta.sender_name ?? meta.sender ?? 'User';
+      return `${sender}: ${r.text}`;
+    })
+    .join('\n');
+}

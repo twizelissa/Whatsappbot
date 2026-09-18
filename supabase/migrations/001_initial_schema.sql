@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS messages (
   source       TEXT NOT NULL CHECK (source IN ('whatsapp', 'call_transcript')),
   media_url    TEXT,
   media_type   TEXT,
-  reply_to     UUID REFERENCES messages(id) ON DELETE SET NULL,
+  reply_to     TEXT,
   group_id     TEXT NOT NULL DEFAULT '',
   metadata     JSONB NOT NULL DEFAULT '{}',
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()

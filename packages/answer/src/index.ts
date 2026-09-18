@@ -3,7 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import getEnv from '@unipods/shared/src/config';
-import { hybridSearch, findDuplicateQuestion, getLastSyncTimestamp } from '@unipods/shared/src/retrieval';
+import { hybridSearch, findDuplicateQuestion, getLastSyncTimestamp, getRecentChunks, getRecentThreadHistory } from '@unipods/shared/src/retrieval';
 import { generateAnswer } from '@unipods/shared/src/llm';
 import { query } from '@unipods/shared/src/db';
 import {
@@ -184,37 +184,65 @@ async function handleQuestion(
 
 // ── Manual test endpoint (no WhatsApp needed) ─────────────────
 app.post('/ask', async (req: Request, res: Response) => {
-  const { question, user_phone = 'test', user_name } = req.body;
+  try {
+    const { question, user_phone = 'test', user_name, group_id } = req.body;
 
-  if (!question) {
-    return res.status(400).json({ error: 'question is required' });
+    if (!question) {
+      return res.status(400).json({ error: 'question is required' });
+    }
+
+    const lastSync = await getLastSyncTimestamp();
+    const freshnessMins = lastSync ? (Date.now() - lastSync.getTime()) / 60000 : null;
+
+    const dup = env.ENABLE_DUPLICATE_DETECTION === 'true'
+      ? await findDuplicateQuestion(question)
+      : null;
+
+    const isSummaryQuery = /^\s*(summarize|summary|summaries|digest|overview|recap|recent chat|recent messages|what happened|what's new)/i.test(question);
+
+    const targetGroup = group_id || env.GROUP_ID || undefined;
+
+    const chunks = isSummaryQuery
+      ? await getRecentChunks(targetGroup, 30)
+      : await hybridSearch(question, {
+          groupId: targetGroup,
+          topK: 8,
+          recencyBoost: true,
+        });
+
+    const conversationHistory = targetGroup
+      ? await getRecentThreadHistory(targetGroup, 6)
+      : undefined;
+
+    const answerResult = await generateAnswer(question, chunks, {
+      isDuplicateQuestion: !!dup,
+      duplicateContext: dup?.context,
+      freshnessMins: freshnessMins ?? undefined,
+      userName: user_name,
+      conversationHistory,
+    });
+
+    return res.json({
+      ...answerResult,
+      freshness_mins: freshnessMins,
+      chunks_found: chunks.length,
+    });
+  } catch (err: unknown) {
+    logger.error({ err }, 'Error in /ask route');
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('429') || msg.includes('Quota exceeded')) {
+      return res.status(429).json({
+        answer: '⏳ Rate limit reached. Gemini API free tier limit exceeded (5 req/min) — please wait ~30 seconds before asking again.',
+        confidence: 'insufficient',
+        is_duplicate_question: false,
+      });
+    }
+    return res.status(500).json({
+      answer: '⚠️ An error occurred while generating an answer. Please try again.',
+      confidence: 'insufficient',
+      is_duplicate_question: false,
+    });
   }
-
-  const lastSync = await getLastSyncTimestamp();
-  const freshnessMins = lastSync ? (Date.now() - lastSync.getTime()) / 60000 : null;
-
-  const dup = env.ENABLE_DUPLICATE_DETECTION === 'true'
-    ? await findDuplicateQuestion(question)
-    : null;
-
-  const chunks = await hybridSearch(question, {
-    groupId: env.GROUP_ID || undefined,
-    topK: 8,
-    recencyBoost: true,
-  });
-
-  const answerResult = await generateAnswer(question, chunks, {
-    isDuplicateQuestion: !!dup,
-    duplicateContext: dup?.context,
-    freshnessMins: freshnessMins ?? undefined,
-    userName: user_name,
-  });
-
-  res.json({
-    ...answerResult,
-    freshness_mins: freshnessMins,
-    chunks_found: chunks.length,
-  });
 });
 
 // ── Stats (for dashboard) ─────────────────────────────────────

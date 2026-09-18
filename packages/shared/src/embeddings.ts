@@ -1,7 +1,9 @@
 import OpenAI from 'openai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import getEnv from './config';
 
 let _openai: OpenAI | null = null;
+let _geminiClient: GoogleGenerativeAI | null = null;
 
 function getOpenAI(): OpenAI {
   if (!_openai) {
@@ -9,6 +11,15 @@ function getOpenAI(): OpenAI {
     _openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
   }
   return _openai;
+}
+
+function getGeminiClient(): GoogleGenerativeAI {
+  if (!_geminiClient) {
+    const env = getEnv();
+    if (!env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is not set');
+    _geminiClient = new GoogleGenerativeAI(env.GEMINI_API_KEY);
+  }
+  return _geminiClient;
 }
 
 /**
@@ -20,6 +31,10 @@ export async function embed(texts: string[]): Promise<number[][]> {
 
   if (env.EMBEDDING_PROVIDER === 'openai') {
     return embedOpenAI(texts);
+  }
+
+  if (env.EMBEDDING_PROVIDER === 'gemini') {
+    return embedGemini(texts);
   }
 
   // Fallback: local embedding via sentence-transformers HTTP endpoint
@@ -49,6 +64,20 @@ async function embedOpenAI(texts: string[]): Promise<number[][]> {
     for (const item of res.data) {
       results.push(item.embedding);
     }
+  }
+
+  return results;
+}
+
+async function embedGemini(texts: string[]): Promise<number[][]> {
+  const env = getEnv();
+  const model = getGeminiClient().getGenerativeModel({ model: env.EMBEDDING_MODEL });
+  const results: number[][] = [];
+
+  // Gemini embedding API processes one text at a time
+  for (const text of texts) {
+    const result = await model.embedContent(text);
+    results.push(result.embedding.values);
   }
 
   return results;

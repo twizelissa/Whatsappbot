@@ -5,7 +5,7 @@ import fs from 'fs';
 import getEnv from '@unipods/shared/src/config';
 import { transcribeAndIngest } from './transcriber';
 import { watchRecordingsDir } from './watcher';
-import { startGoogleMeetPoller } from './google-drive';
+import { startTeamsRecordingPoller } from './teams';
 import pino from 'pino';
 
 const logger = pino({ level: 'info', transport: { target: 'pino-pretty' } });
@@ -86,25 +86,24 @@ const onTranscribed = async (callId: string) => {
   logger.info({ callId }, '🔔 Transcript ready — scheduler will auto-recap');
 };
 
-// 1. Watch local recordings/ folder (manual drops or local meeting exports)
+// 1. Watch local recordings/ folder (manual drops)
 watchRecordingsDir(async (callId) => onTranscribed(callId));
 
-// 2. Poll Google Drive for new Google Meet recordings (auto)
+// 2. Poll Microsoft Teams for new call recordings via Graph API
 //    Starts silently if credentials not set (logs a warning, doesn't crash)
-startGoogleMeetPoller({
-  pollIntervalMs: parseInt(process.env.GOOGLE_DRIVE_POLL_INTERVAL_MS ?? '300000'), // 5 min
-  folderId: process.env.GOOGLE_DRIVE_RECORDINGS_FOLDER_ID,
+startTeamsRecordingPoller({
+  pollIntervalMs: parseInt(process.env.TEAMS_POLL_INTERVAL_MS ?? '300000'), // 5 min
   lookBackDays: 7,
   onTranscribed: async (callId) => onTranscribed(callId),
-}).catch((err) => logger.error({ err }, '❌ Google Meet poller failed to start'));
+}).catch((err) => logger.error({ err }, '❌ Teams recording poller failed to start'));
 
 const PORT = env.INGESTION_PORT + 1; // 3003 by default
 app.listen(PORT, () => {
   logger.info(`🎙️ Transcription service running on port ${PORT}`);
   logger.info(`   📁 Local folder watcher: ${RECORDINGS_DIR}`);
-  logger.info(`   ☁️  Google Meet poller: ${
-    process.env.GOOGLE_DRIVE_RECORDINGS_FOLDER_ID
-      ? `folder ${process.env.GOOGLE_DRIVE_RECORDINGS_FOLDER_ID}`
-      : 'full-drive search (set GOOGLE_DRIVE_RECORDINGS_FOLDER_ID to narrow it)'
+  logger.info(`   🟦 Teams recording poller: ${
+    process.env.TEAMS_CLIENT_ID
+      ? `tenant ${process.env.TEAMS_TENANT_ID} / user ${process.env.TEAMS_USER_ID ?? 'org-wide'}`
+      : 'disabled (set TEAMS_CLIENT_ID / TEAMS_CLIENT_SECRET / TEAMS_TENANT_ID to enable)'
   }`);
 });
