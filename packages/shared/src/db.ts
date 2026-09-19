@@ -34,9 +34,28 @@ export function getPool(): Pool {
 }
 
 export async function query<T = unknown>(sql: string, params?: unknown[]): Promise<T[]> {
-  const pool = getPool();
-  const result = await pool.query(sql, params);
-  return result.rows as T[];
+  let retries = 2;
+  while (retries >= 0) {
+    try {
+      const pool = getPool();
+      const result = await pool.query(sql, params);
+      return result.rows as T[];
+    } catch (err: any) {
+      const isConnError = 
+        err?.message?.includes('Connection terminated') || 
+        err?.message?.includes('connection timeout') ||
+        err?.code === '57P01';
+      if (isConnError && retries > 0) {
+        console.warn(`⚠️ DB Connection lost, resetting pool and retrying (${retries} left)...`);
+        await closePool();
+        retries--;
+        await new Promise((res) => setTimeout(res, 1000));
+      } else {
+        throw err;
+      }
+    }
+  }
+  throw new Error('Database query failed after retries');
 }
 
 export async function queryOne<T = unknown>(sql: string, params?: unknown[]): Promise<T | null> {

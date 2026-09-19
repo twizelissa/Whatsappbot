@@ -86,17 +86,14 @@ export async function startBaileysListener(): Promise<void> {
 
       logger.warn(`Connection closed. Status: ${statusCode}. Reconnect: ${shouldReconnect}`);
 
-      if (shouldReconnect && retryCount < MAX_RETRIES) {
+      if (shouldReconnect) {
         retryCount++;
-        const delay = Math.min(1000 * 2 ** retryCount, 30000);
-        logger.info(`Reconnecting in ${delay}ms (attempt ${retryCount}/${MAX_RETRIES})...`);
+        const delay = Math.min(2000 * Math.pow(1.5, Math.min(retryCount, 10)), 30000);
+        logger.info(`Reconnecting in ${Math.round(delay)}ms (attempt ${retryCount})...`);
         setTimeout(() => startBaileysListener(), delay);
-      } else if (statusCode === DisconnectReason.loggedOut) {
+      } else {
         logger.error('❌ Logged out. Delete auth folder and restart to re-pair.');
         fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-        process.exit(1);
-      } else {
-        logger.error('❌ Max reconnect attempts reached. Exiting.');
         process.exit(1);
       }
     }
