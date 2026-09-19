@@ -265,8 +265,18 @@ app.get('/answers', async (req: Request, res: Response) => {
 
 // ── Error handler ─────────────────────────────────────────────
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-  logger.error({ err }, 'Unhandled error');
-  res.status(500).json({ error: 'Internal server error' });
+  logger.error({ err }, 'Unhandled Express error');
+  if (!res.headersSent) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+process.on('uncaughtException', (err) => {
+  logger.error({ err }, '🚨 Uncaught Exception in answer service process');
+});
+
+process.on('unhandledRejection', (reason) => {
+  logger.error({ reason }, '🚨 Unhandled Rejection in answer service process');
 });
 
 app.listen(env.ANSWER_SERVICE_PORT, () => {
