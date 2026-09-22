@@ -18,6 +18,10 @@ async function main(): Promise<void> {
   const app = express();
   app.use(express.json());
 
+  app.get('/', (_req, res) => {
+    res.redirect('/qr');
+  });
+
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok', service: 'ingestion', timestamp: new Date().toISOString() });
   });
