@@ -632,7 +632,59 @@ async function askAndReplyInGroup({
       logger.error({ status: res.status, errText }, 'Answer service returned error HTTP status');
     }
   } catch (err) {
-    logger.error({ err }, 'Failed to reach answer service');
+    logger.warn({ err }, 'Answer service HTTP endpoint not reachable — falling back to direct in-process Q&A');
+  }
+
+  // Direct in-process fallback if HTTP service is not running
+  if (!data) {
+    try {
+      const {
+        getLastSyncTimestamp,
+        findDuplicateQuestion,
+        getRecentChunks,
+        hybridSearch,
+        getRecentThreadHistory,
+        generateAnswer,
+      } = await import('@unipods/shared');
+
+      const lastSync = await getLastSyncTimestamp();
+      const freshnessMins = lastSync ? (Date.now() - lastSync.getTime()) / 60000 : undefined;
+
+      const dup = env.ENABLE_DUPLICATE_DETECTION === 'true'
+        ? await findDuplicateQuestion(question)
+        : null;
+
+      const isSummaryQuery = /^\s*(summarize|summary|summaries|digest|overview|recap|recent chat|recent messages|what happened|what's new)/i.test(question);
+      const targetGroup = groupJid || env.GROUP_ID || undefined;
+
+      const chunks = isSummaryQuery
+        ? await getRecentChunks(targetGroup, 30)
+        : await hybridSearch(question, {
+            groupId: targetGroup,
+            topK: 8,
+            recencyBoost: true,
+          });
+
+      const conversationHistory = targetGroup
+        ? await getRecentThreadHistory(targetGroup, 6)
+        : undefined;
+
+      const answerResult = await generateAnswer(question, chunks, {
+        isDuplicateQuestion: !!dup,
+        duplicateContext: dup?.context,
+        freshnessMins,
+        userName: senderName,
+        conversationHistory,
+      });
+
+      data = {
+        answer: answerResult.answer,
+        confidence: answerResult.confidence,
+        is_duplicate_question: !!dup,
+      };
+    } catch (directErr) {
+      logger.error({ directErr }, 'Direct Q&A fallback failed');
+    }
   }
 
   let reply = '';
