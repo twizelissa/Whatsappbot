@@ -10,3 +10,5 @@ recordings/processed/
 .DS_Store
 *.zip
 *.pdf
+render.env
+*.env
