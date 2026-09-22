@@ -209,7 +209,7 @@ export function parseWebhookPayload(body: unknown): {
  */
 export function formatAnswerForWhatsApp(
   answer: string,
-  confidence: string,
+  _confidence: string,
   isDuplicate: boolean,
   opts: { isGroup?: boolean; senderName?: string } = {}
 ): string {
@@ -223,14 +223,8 @@ export function formatAnswerForWhatsApp(
     prefix = `@${senderName}\n\n`;
   }
 
-  if (confidence === 'insufficient') {
-    prefix += '❓ ';
-  } else if (confidence === 'low') {
-    prefix += '⚠️ *Partial info* — I may not have the full picture:\n\n';
-  }
-
   if (isDuplicate) {
-    suffix = '\n\n📌 _This was asked before — check earlier in the chat for more context._';
+    suffix = '\n\n_This was asked before — check earlier in the chat for more context._';
   }
 
   return prefix + answer + suffix;

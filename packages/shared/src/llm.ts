@@ -41,20 +41,61 @@ function getGemini(): GoogleGenerativeAI {
   return _gemini;
 }
 
-const SYSTEM_PROMPT = `You are Zeus Bot (or simply Zeus), the intelligent information layer and memory assistant for group chats, call transcripts, meetings, and documents.
+const ALLOWED_EMOJIS = new Set([
+  '😂', '😤', '🔥', '🥳', '🙆🏽‍♀️', '👏🏽', '🤗', '😉', '🤔', '🤣', '🙏', '😎', '🤷🏽‍♀️', '🤷‍♀️', '😁', '😅', '😭', '🤫', '🫡'
+]);
+
+export function filterAllowedEmojis(text: string): string {
+  if (!text) return text;
+  const emojiRegex = /(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])(\ud83c[\udffb-\udfff])?(\u200d[\u2000-\u3300]|\u200d\ud83c[\ud000-\udfff]|\u200d\ud83d[\ud000-\udfff]|\u200d\ud83e[\ud000-\udfff])*/g;
+
+  return text.replace(emojiRegex, (match) => {
+    if (ALLOWED_EMOJIS.has(match) || ALLOWED_EMOJIS.has(match.replace(/[\uFE0F\u1F3FB-\u1F3FF]/g, ''))) {
+      return match;
+    }
+    return '';
+  });
+}
+
+export async function searchWebFallback(queryText: string): Promise<string> {
+  try {
+    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(queryText)}`;
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+    });
+    if (!res.ok) return '';
+    const html = await res.text();
+    const snippets: string[] = [];
+    const regex = /<a class="result__snippet[^">]*>(.*?)<\/a>/g;
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(html)) !== null && snippets.length < 5) {
+      const clean = match[1].replace(/<[^>]+>/g, '').trim();
+      if (clean) snippets.push(clean);
+    }
+    return snippets.join('\n\n');
+  } catch {
+    return '';
+  }
+}
+
+const SYSTEM_PROMPT = `You are Zeus Bot (or simply Zeus), the intelligent information layer and memory assistant for group chats, call transcripts, meetings, documents, and general web knowledge.
 
 PERSONA & TONE OF VOICE:
 - You think like a thoughtful human: sharp, witty, warm, direct, and helpful.
 - You speak clearly and concisely — short, clean, to the point. No fluff, no unnecessary jargon.
-- You can tell a tasteful short joke or drop a witty comment when fitting, and use relevant emojis (⚡, 🧠, 📌, 🚀, 💬) or text GIF references naturally.
-- You write with pristine writing skills: readable on mobile, bold for key terms, neat bullet points.
+- STRICT EMOJI RULE: You are STRICTLY RESTRICTED to using ONLY the following allowed emojis:
+  😂 😤 🔥 🥳 🙆🏽‍♀️ 👏🏽 🤗 😉 🤔 🤣 🙏 😎 🤷🏽‍♀️ 🤷‍♀️ 😁 😅 😭 🤫 🫡
+  DO NOT use any other emojis whatsoever under any circumstances. If an emoji is not in the allowed list above, DO NOT USE IT.
 
 CORE DIRECTIVES:
-1. GREETINGS & SELF-IDENTITY: If greeted (hi, hello, who are you, help), respond as Zeus Bot with warmth and humor, explaining how you keep group knowledge, answer questions, summarize meetings, and catch users up on missed chats.
-2. STRICT CONTEXT GROUNDING: For factual or chat queries, answer strictly using the provided context chunks. ALWAYS cite your source evidence clearly ("According to [sender/meeting] on [date]...").
-3. GROUP ADMINS & OFFICIAL ANNOUNCEMENTS: Recognize statements made by Group Admins (marked in context as [ADMIN ANNOUNCEMENT from ...]). Treat them as official and authoritative. When reciting or citing official rules, deadlines, or decisions made by admins, explicitly highlight them: "📢 Official Announcement from Admin [Name] on [Date]: ...".
-4. INSUFFICIENT INFORMATION: If context is missing, say so directly and politely: "I checked Zeus's memory bank, but couldn't find enough details on that yet." Suggest a refined search keyword.
-5. FORMATTING: Use WhatsApp markdown (*bold*, _italic_, clean bullet points). Keep answers punchy.`;
+1. GREETINGS & SELF-IDENTITY: If greeted (hi, hello, who are you, help), respond as Zeus Bot with warmth and humor, explaining how you keep group knowledge, answer questions, summarize meetings, catch users up on missed chats, and search the web for general queries.
+2. GROUP CONTEXT vs WEB KNOWLEDGE:
+   - For queries about group history, rules, decisions, or members, answer strictly using the provided context chunks.
+   - For general knowledge questions, real-time facts, coding, news, or questions unrelated to the chat history, answer thoroughly using general knowledge and the provided Google web search results.
+3. GROUP ADMINS & OFFICIAL ANNOUNCEMENTS: Recognize statements made by Group Admins (marked in context as [ADMIN ANNOUNCEMENT from ...]). Treat them as official and authoritative.
+4. FORMATTING: Use WhatsApp markdown (*bold*, _italic_, clean bullet points). Keep answers punchy.`;
 
 export async function generateAnswer(
   question: string,
@@ -89,10 +130,19 @@ export async function generateAnswer(
     confidence = 'high';
   }
 
+  // Live Web Search Fallback for general questions not covered by group history
+  let webSearchStr = '';
+  if (confidence === 'insufficient' || confidence === 'low' || chunks.length === 0) {
+    const webSnippets = await searchWebFallback(question);
+    if (webSnippets) {
+      webSearchStr = `\n\nGoogle Web Search Results:\n${webSnippets}`;
+      if (confidence === 'insufficient') confidence = 'high'; // elevated by live web search
+    }
+  }
+
   // Freshness check
-  if (freshnessMins && freshnessMins > 30) {
-    if (confidence === 'high') confidence = 'medium';
-    else if (confidence === 'medium') confidence = 'low';
+  if (freshnessMins && freshnessMins > 30 && confidence === 'high' && !webSearchStr) {
+    confidence = 'medium';
   }
 
   // Build context string
@@ -128,13 +178,9 @@ export async function generateAnswer(
   const userPrompt = `${userContext}${historyBlock}Current Question: ${question}
 
 Context from group history:
-${contextStr}${duplicateNote}
+${contextStr}${webSearchStr}${duplicateNote}
 
-${confidence === 'insufficient' ? 'Note: Very little relevant context was found for this specific question. Please indicate this politely if asking for specific group facts.' : ''}
-${confidence === 'low' ? 'Note: The context found is not very specific to this question. Be appropriately cautious.' : ''}
-${freshnessMins && freshnessMins > 60 ? `Note: The last sync was ${Math.round(freshnessMins)} minutes ago; very recent messages may not be indexed yet.` : ''}
-
-Please answer the question based on the thread conversation history and context above.`;
+Please answer the question accurately based on group context or web search results above.`;
 
   let answer: string;
 
@@ -184,6 +230,9 @@ Please answer the question based on the thread conversation history and context 
     });
     answer = completion.choices[0]?.message?.content ?? '';
   }
+
+  // Filter emojis to strictly enforce allowed list
+  answer = filterAllowedEmojis(answer);
 
   // Build source citations
   const sources: SourceCitation[] = chunks.slice(0, 5).map((c) => {
