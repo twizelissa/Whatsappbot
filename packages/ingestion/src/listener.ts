@@ -661,13 +661,27 @@ async function askAndReplyInGroup({
       const isSummaryQuery = /^\s*(summarize|summary|summaries|digest|overview|recap|recent chat|recent messages|what happened|what's new)/i.test(question);
       const targetGroup = groupJid || env.GROUP_ID || undefined;
 
-      const chunks = isSummaryQuery
+      let chunks = isSummaryQuery
         ? await getRecentChunks(targetGroup, 30)
         : await hybridSearch(question, {
             groupId: targetGroup,
             topK: 8,
             recencyBoost: true,
           });
+
+      if (!isSummaryQuery && chunks.length < 3) {
+        logger.info('🔍 Current group yielded low memory results — searching global imported history across all exported chats');
+        const globalChunks = await hybridSearch(question, {
+          topK: 8,
+          recencyBoost: false,
+        });
+        const existingIds = new Set(chunks.map((c) => c.id));
+        for (const gc of globalChunks) {
+          if (!existingIds.has(gc.id)) {
+            chunks.push(gc);
+          }
+        }
+      }
 
       const conversationHistory = targetGroup
         ? await getRecentThreadHistory(targetGroup, 6)
