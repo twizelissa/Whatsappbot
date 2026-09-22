@@ -14,4 +14,4 @@ ENV NODE_ENV=production
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 COPY --from=builder /app/packages/answer/dist ./packages/answer/dist
-CMD ["node", "packages/answer/dist/index.js"]
+CMD ["node", "packages/answer/dist/answer/src/index.js"]

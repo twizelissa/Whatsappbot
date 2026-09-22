@@ -14,4 +14,4 @@ ENV NODE_ENV=production
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 COPY --from=builder /app/packages/scheduler/dist ./packages/scheduler/dist
-CMD ["node", "packages/scheduler/dist/index.js"]
+CMD ["node", "packages/scheduler/dist/scheduler/src/index.js"]
