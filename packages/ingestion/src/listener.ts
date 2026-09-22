@@ -571,7 +571,8 @@ async function sendDirectReply(
   sock: ReturnType<typeof makeWASocket>,
   jid: string,
   text: string,
-  quotedMsg?: WAMessage
+  quotedMsg?: WAMessage,
+  mentions?: string[]
 ): Promise<void> {
   try {
     const isLid = jid.endsWith('@lid');
@@ -579,16 +580,19 @@ async function sendDirectReply(
     const shouldQuote = quotedMsg && !isLid && !isFromMe;
     const options = shouldQuote ? { quoted: quotedMsg } : {};
 
-    const sent = await sock.sendMessage(jid, { text }, options);
+    const messageContent = mentions && mentions.length > 0 ? { text, mentions } : { text };
+
+    const sent = await sock.sendMessage(jid, messageContent, options);
     if (sent?.key?.id) {
       sentMessageIds.add(sent.key.id);
       setTimeout(() => sentMessageIds.delete(sent.key.id!), 60000);
-      logger.info({ jid, textLen: text.length, isLid }, '✅ Direct reply successfully sent via WhatsApp');
+      logger.info({ jid, textLen: text.length, isLid, mentions }, '✅ Direct reply successfully sent via WhatsApp');
     }
   } catch (err) {
     logger.warn({ err, jid }, '⚠️ Failed sending direct reply with quote, attempting unquoted fallback...');
     try {
-      const sent = await sock.sendMessage(jid, { text });
+      const messageContent = mentions && mentions.length > 0 ? { text, mentions } : { text };
+      const sent = await sock.sendMessage(jid, messageContent);
       if (sent?.key?.id) {
         sentMessageIds.add(sent.key.id);
         setTimeout(() => sentMessageIds.delete(sent.key.id!), 60000);
@@ -685,36 +689,44 @@ async function askAndReplyInGroup({
     } catch (directErr: any) {
       logger.error({ directErr }, 'Direct Q&A fallback failed');
       const errDetail = directErr instanceof Error ? directErr.message : String(directErr);
+      
+      let errorMsg = `Zeus Bot: I received your query, but encountered an issue: ${errDetail}`;
+      if (errDetail.includes('429') || errDetail.toLowerCase().includes('quota') || errDetail.toLowerCase().includes('rate limit') || errDetail.toLowerCase().includes('resourceexhausted')) {
+        errorMsg = `⏳ *Token / Quota Limit Reached*: Gemini API rate limit or token quota exceeded. Please wait 30 seconds before asking again.`;
+      }
+
       data = {
-        answer: `⚡ *Zeus Bot*: I received your query, but encountered an issue: ${errDetail}`,
+        answer: errorMsg,
         confidence: 'insufficient',
         is_duplicate_question: false,
       };
     }
   }
 
+  // Proper WhatsApp User Tagging logic
+  const isGroup = groupJid.endsWith('@g.us');
+  const senderJid = quotedMsg.key.participant ?? quotedMsg.key.remoteJid ?? '';
+  const senderPhone = senderJid.replace('@s.whatsapp.net', '').replace('@lid', '').split(':')[0].split('@')[0];
+
   let reply = '';
-  if (senderName && senderName !== 'User' && senderName !== 'Group') {
-    reply += `@${senderName}\n\n`;
+  const mentions: string[] = [];
+
+  if (isGroup && senderPhone && !quotedMsg.key.fromMe) {
+    reply += `@${senderPhone}\n\n`;
+    if (senderJid) mentions.push(senderJid);
   }
 
   if (!data) {
-    reply += '⚡ *Zeus Bot*: I received your query! I ran into a temporary issue retrieving memory context, but I am online and listening. Please try asking again!';
+    reply += 'Zeus Bot: I received your query! I ran into a temporary issue retrieving memory context, but I am online and listening. Please try asking again!';
   } else {
-    if (data.confidence === 'insufficient') {
-      reply += '❓ ';
-    } else if (data.confidence === 'low') {
-      reply += '⚠️ *Partial info* — I may not have the full picture:\n\n';
-    }
-
     reply += data.answer;
 
     if (data.is_duplicate_question) {
-      reply += '\n\n📌 _This was asked before — check earlier in the chat for more context._';
+      reply += '\n\n_This was asked before — check earlier in the chat for more context._';
     }
   }
 
-  await sendDirectReply(sock, groupJid, reply.slice(0, 4000), quotedMsg);
+  await sendDirectReply(sock, groupJid, reply.slice(0, 4000), quotedMsg, mentions);
 
   if (data?.answer) {
     ingestMessage({
