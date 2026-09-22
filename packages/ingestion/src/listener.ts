@@ -682,8 +682,14 @@ async function askAndReplyInGroup({
         confidence: answerResult.confidence,
         is_duplicate_question: !!dup,
       };
-    } catch (directErr) {
+    } catch (directErr: any) {
       logger.error({ directErr }, 'Direct Q&A fallback failed');
+      const errDetail = directErr instanceof Error ? directErr.message : String(directErr);
+      data = {
+        answer: `⚡ *Zeus Bot*: I received your query, but encountered an issue: ${errDetail}`,
+        confidence: 'insufficient',
+        is_duplicate_question: false,
+      };
     }
   }
 
