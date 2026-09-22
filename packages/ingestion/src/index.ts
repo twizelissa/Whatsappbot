@@ -73,8 +73,9 @@ async function main(): Promise<void> {
     `);
   });
 
-  app.listen(env.INGESTION_PORT, () => {
-    logger.info(`🚀 Ingestion health check & Web QR on http://localhost:${env.INGESTION_PORT}/qr`);
+  const port = process.env.PORT ? parseInt(process.env.PORT, 10) : env.INGESTION_PORT;
+  app.listen(port, () => {
+    logger.info(`🚀 Ingestion health check & Web QR on http://localhost:${port}/qr`);
   });
 
   // Start Baileys

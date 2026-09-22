@@ -543,8 +543,9 @@ process.on('unhandledRejection', (reason) => {
   logger.error({ reason }, '🚨 Unhandled Rejection in answer service process');
 });
 
-app.listen(env.ANSWER_SERVICE_PORT, () => {
-  logger.info(`🤖 Answer service running on port ${env.ANSWER_SERVICE_PORT}`);
+const port = process.env.PORT ? parseInt(process.env.PORT, 10) : env.ANSWER_SERVICE_PORT;
+app.listen(port, () => {
+  logger.info(`🤖 Answer service running on port ${port}`);
   logger.info(`📬 Webhook: POST /webhook`);
   logger.info(`   Group mode: @mention the bot in the group to trigger answers`);
   logger.info(`   DM mode: message the bot number directly`);
