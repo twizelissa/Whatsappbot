@@ -2,10 +2,16 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
-import getEnv from '@unipods/shared/src/config';
-import { hybridSearch, findDuplicateQuestion, getLastSyncTimestamp, getRecentChunks, getRecentThreadHistory } from '@unipods/shared/src/retrieval';
-import { generateAnswer } from '@unipods/shared/src/llm';
-import { query } from '@unipods/shared/src/db';
+import {
+  getEnv,
+  hybridSearch,
+  findDuplicateQuestion,
+  getLastSyncTimestamp,
+  getRecentChunks,
+  getRecentThreadHistory,
+  generateAnswer,
+  query,
+} from '@unipods/shared';
 import {
   parseWebhookPayload,
   sendWhatsAppReply,
@@ -250,6 +256,264 @@ app.get('/stats', async (_req: Request, res: Response) => {
   const { queryOne } = await import('@unipods/shared/src/db');
   const stats = await queryOne<Record<string, unknown>>('SELECT get_bot_stats()');
   res.json(stats?.get_bot_stats ?? {});
+});
+
+async function getGroupsFromDatabase(): Promise<{ jid: string; subject: string; participant_count?: number; message_count?: number; last_activity?: string }[]> {
+  const groupsMap = new Map<string, { jid: string; subject: string; participant_count?: number; message_count?: number; last_activity?: string }>();
+
+  // 1. Check live Ingestion Service API via HTTP
+  try {
+    const res = await fetch(`http://localhost:${env.INGESTION_PORT}/groups`, { signal: AbortSignal.timeout(1500) });
+    if (res.ok) {
+      const data = await res.json() as { groups: any[] };
+      for (const mg of data.groups || []) {
+        if (mg.jid) {
+          groupsMap.set(mg.jid, {
+            jid: mg.jid,
+            subject: mg.subject || mg.jid,
+            participant_count: mg.participant_count,
+          });
+        }
+      }
+    }
+  } catch {}
+
+  // 2. Read active_groups.json disk file fallback
+  try {
+    const fs = await import('fs');
+    const path = await import('path');
+    const activeFile = path.resolve(__dirname, '../../../packages/.baileys-auth/active_groups.json');
+    const altActiveFile = path.resolve(process.cwd(), 'packages/.baileys-auth/active_groups.json');
+    const targetFile = fs.existsSync(activeFile) ? activeFile : (fs.existsSync(altActiveFile) ? altActiveFile : null);
+
+    if (targetFile) {
+      const data = JSON.parse(fs.readFileSync(targetFile, 'utf-8')) as any[];
+      for (const g of data) {
+        if (g.jid && g.is_active && !groupsMap.has(g.jid)) {
+          groupsMap.set(g.jid, {
+            jid: g.jid,
+            subject: g.subject || g.jid,
+            participant_count: g.participant_count,
+          });
+        }
+      }
+    }
+  } catch {}
+
+  // 3. Fallback to env.GROUP_ID if set
+  if (groupsMap.size === 0 && env.GROUP_ID) {
+    const items = env.GROUP_ID.split(',').map((s) => s.trim()).filter(Boolean);
+    for (const item of items) {
+      groupsMap.set(item, {
+        jid: item,
+        subject: item.includes('@g.us') ? `Configured Group (${item.slice(0, 10)}...)` : item,
+      });
+    }
+  }
+
+  // Populate message statistics for active groups only
+  if (groupsMap.size > 0) {
+    try {
+      const activeJids = Array.from(groupsMap.keys());
+      const rows = await query<{ jid: string; count: string; last_msg: string }>(
+        `SELECT 
+           group_id as jid,
+           COUNT(*)::text as count,
+           MAX(timestamp)::text as last_msg
+         FROM messages
+         WHERE group_id = ANY($1)
+         GROUP BY group_id`,
+        [activeJids]
+      );
+      for (const r of rows) {
+        const existing = groupsMap.get(r.jid);
+        if (existing) {
+          existing.message_count = parseInt(r.count, 10) || 0;
+          existing.last_activity = r.last_msg;
+        }
+      }
+    } catch {}
+  }
+
+  return Array.from(groupsMap.values());
+}
+
+// ── Bot Status & Mode ──────────────────────────────────────────
+app.get('/status', async (_req: Request, res: Response) => {
+  try {
+    const lastSync = await getLastSyncTimestamp();
+    const lastSyncMins = lastSync ? (Date.now() - lastSync.getTime()) / 60000 : null;
+    const isWorking = lastSyncMins !== null && lastSyncMins < 60;
+
+    const groupsList = await getGroupsFromDatabase();
+
+    const stats = await query<{ total_messages: number; total_chunks: number; total_answers: number }>(
+      `SELECT
+         (SELECT count(*)::int FROM messages) as total_messages,
+         (SELECT count(*)::int FROM chunks) as total_chunks,
+         (SELECT count(*)::int FROM answers) as total_answers`
+    );
+    const s = stats[0] || { total_messages: 0, total_chunks: 0, total_answers: 0 };
+
+    res.json({
+      bot_name: 'Zeus Bot',
+      status: isWorking ? 'working' : 'sleeping',
+      mode: 'active',
+      active_groups_count: groupsList.length,
+      groups: groupsList,
+      total_messages: s.total_messages ?? 0,
+      total_chunks: s.total_chunks ?? 0,
+      total_answers: s.total_answers ?? 0,
+      last_message_at: lastSync?.toISOString() ?? null,
+      uptime_seconds: process.uptime(),
+    });
+  } catch (err) {
+    logger.error({ err }, 'Failed to fetch status');
+    res.status(500).json({ error: 'Failed to fetch status' });
+  }
+});
+
+// ── Groups management ──────────────────────────────────────────
+app.get('/groups', async (_req: Request, res: Response) => {
+  try {
+    const groups = await getGroupsFromDatabase();
+    res.json({ count: groups.length, groups });
+  } catch {
+    res.json({ count: 0, groups: [] });
+  }
+});
+
+app.post('/groups/add', async (req: Request, res: Response) => {
+  const { invite_link } = req.body;
+  if (!invite_link) {
+    return res.status(400).json({ error: 'invite_link is required' });
+  }
+
+  try {
+    const response = await fetch(`http://localhost:${env.INGESTION_PORT}/join-group`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ invite_link }),
+    });
+    const result = await response.json();
+    res.json(result);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, message: `Could not reach Ingestion service to join group: ${msg}` });
+  }
+});
+
+app.post('/restart', async (_req: Request, res: Response) => {
+  try {
+    const response = await fetch(`http://localhost:${env.INGESTION_PORT}/restart`, {
+      method: 'POST',
+    });
+    const result = await response.json();
+    res.json(result);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, message: `Could not reach Ingestion service to restart: ${msg}` });
+  }
+});
+
+// ── Catch-Up ("What did I miss?") ──────────────────────────────
+app.get('/catchup', async (req: Request, res: Response) => {
+  try {
+    const timeframe = (req.query.timeframe as string) || 'today';
+    const group_id = req.query.group_id as string | undefined;
+    const user_name = req.query.user_name as string | undefined;
+
+    let hours = 24;
+    let label = 'today';
+    if (timeframe === 'yesterday') {
+      hours = 48;
+      label = 'yesterday';
+    } else if (timeframe === 'this_week') {
+      hours = 168;
+      label = 'this week';
+    }
+
+    const { getCatchUpChunks } = await import('@unipods/shared/src/retrieval');
+    const { generateCatchUp } = await import('@unipods/shared/src/llm');
+
+    const chunks = await getCatchUpChunks(group_id, hours, 50);
+    const catchup = await generateCatchUp(label, chunks, user_name);
+
+    res.json(catchup);
+  } catch (err) {
+    logger.error({ err }, 'Error generating catch-up');
+    res.status(500).json({ error: 'Failed to generate catch-up' });
+  }
+});
+
+// ── Meetings Intelligence ──────────────────────────────────────
+app.get('/meetings', async (_req: Request, res: Response) => {
+  try {
+    const rows = await query<{ call_id: string; title: string; count: number; latest_date: string }>(
+      `SELECT
+         COALESCE(metadata->>'call_id', 'Call') as call_id,
+         COALESCE(metadata->>'title', 'Team Meeting') as title,
+         COUNT(*) as count,
+         MAX(created_at) as latest_date
+       FROM chunks
+       WHERE source_type = 'transcript'
+       GROUP BY 1, 2
+       ORDER BY latest_date DESC`
+    );
+    res.json(rows);
+  } catch (err) {
+    res.json([]);
+  }
+});
+
+app.get('/meetings/:callId', async (req: Request, res: Response) => {
+  try {
+    const { callId } = req.params;
+    const { getMeetingChunks } = await import('@unipods/shared/src/retrieval');
+    const { generateMeetingIntelligence } = await import('@unipods/shared/src/llm');
+
+    const chunks = await getMeetingChunks(callId);
+    const intelligence = await generateMeetingIntelligence(callId, chunks);
+    res.json(intelligence);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to analyze meeting' });
+  }
+});
+
+// ── File & Source Ingestion ────────────────────────────────────
+app.post('/ingest/file', async (req: Request, res: Response) => {
+  try {
+    const { title, content, type = 'DOCUMENT', author = 'Admin', group_id } = req.body;
+    if (!content || !title) {
+      return res.status(400).json({ error: 'title and content are required' });
+    }
+
+    const { ingestMessage } = await import('@unipods/shared/src/ingest');
+    const sourceType = type === 'MEETING_TRANSCRIPT' ? 'call_transcript' : 'document';
+
+    const messageId = await ingestMessage({
+      sender: author,
+      sender_name: author,
+      timestamp: new Date(),
+      text: `[${title}]\n\n${content}`,
+      source: sourceType,
+      media_url: null,
+      media_type: null,
+      reply_to: null,
+      group_id: group_id || '',
+      is_admin: true,
+      metadata: {
+        title,
+        type,
+        ingested_at: new Date().toISOString(),
+      },
+    });
+
+    res.json({ success: true, messageId, title, type });
+  } catch (err) {
+    logger.error({ err }, 'Ingestion failed');
+    res.status(500).json({ error: 'Ingestion failed' });
+  }
 });
 
 // ── Recent answers (for dashboard) ───────────────────────────

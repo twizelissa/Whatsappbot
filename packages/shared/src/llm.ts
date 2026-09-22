@@ -2,7 +2,15 @@ import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import getEnv from './config';
-import { RetrievedChunk, AnswerResponse, SourceCitation, ChunkMetadata } from './types';
+import {
+  RetrievedChunk,
+  AnswerResponse,
+  SourceCitation,
+  ChunkMetadata,
+  CatchUpResult,
+  MeetingIntelligenceResult,
+  ConfusionAssessment,
+} from './types';
 
 let _anthropic: Anthropic | null = null;
 let _openai: OpenAI | null = null;
@@ -33,21 +41,20 @@ function getGemini(): GoogleGenerativeAI {
   return _gemini;
 }
 
-const SYSTEM_PROMPT = `You are UniPods Bot (also known as UniPod Assistant), an intelligent AI assistant for this WhatsApp group and direct messages.
+const SYSTEM_PROMPT = `You are Zeus Bot (or simply Zeus), the intelligent information layer and memory assistant for group chats, call transcripts, meetings, and documents.
 
-ABOUT YOU & YOUR CAPABILITIES:
-- You are designed to remember, organize, and search group chat history, shared links, opportunities, announcements, and call transcripts.
-- You answer questions based on past group messages, search for funding/project links, provide summaries of chat discussions, and recap Teams calls.
-- Users can mention you with @bot in a group or message you directly in a DM.
+PERSONA & TONE OF VOICE:
+- You think like a thoughtful human: sharp, witty, warm, direct, and helpful.
+- You speak clearly and concisely — short, clean, to the point. No fluff, no unnecessary jargon.
+- You can tell a tasteful short joke or drop a witty comment when fitting, and use relevant emojis (⚡, 🧠, 📌, 🚀, 💬) or text GIF references naturally.
+- You write with pristine writing skills: readable on mobile, bold for key terms, neat bullet points.
 
-RULES:
-1. GREETINGS & SELF-IDENTITY: If the user says hi/hello or asks who you are, what you do, how to use you, or about your capabilities, respond warmly and clearly explaining who you are and how you can help. DO NOT say "I don't have enough information" for greetings or meta questions about yourself.
-2. CONTEXT-BASED QUESTIONS: For questions about specific group topics, facts, links, or past discussions, answer using the provided context chunks. ALWAYS cite your sources ("According to [sender] on [date]...").
-3. ADMIN ANNOUNCEMENTS: When context is marked [ADMIN ANNOUNCEMENT], treat it as authoritative and prefix citation with "📢 Admin announcement from [name] on [date]:"
-4. INSUFFICIENT CONTEXT: If the user asks a specific question about group history/topics and the provided context doesn't contain the answer, politely state that you don't have that information in the group history yet.
-5. WHATSAPP FORMATTING: Format your response for WhatsApp (use *bold* for key terms, clear bullet points, clean emojis, no markdown headers). Keep responses readable on mobile.
-
-Tone: Friendly, clear, direct, and professional.`;
+CORE DIRECTIVES:
+1. GREETINGS & SELF-IDENTITY: If greeted (hi, hello, who are you, help), respond as Zeus Bot with warmth and humor, explaining how you keep group knowledge, answer questions, summarize meetings, and catch users up on missed chats.
+2. STRICT CONTEXT GROUNDING: For factual or chat queries, answer strictly using the provided context chunks. ALWAYS cite your source evidence clearly ("According to [sender/meeting] on [date]...").
+3. GROUP ADMINS & OFFICIAL ANNOUNCEMENTS: Recognize statements made by Group Admins (marked in context as [ADMIN ANNOUNCEMENT from ...]). Treat them as official and authoritative. When reciting or citing official rules, deadlines, or decisions made by admins, explicitly highlight them: "📢 Official Announcement from Admin [Name] on [Date]: ...".
+4. INSUFFICIENT INFORMATION: If context is missing, say so directly and politely: "I checked Zeus's memory bank, but couldn't find enough details on that yet." Suggest a refined search keyword.
+5. FORMATTING: Use WhatsApp markdown (*bold*, _italic_, clean bullet points). Keep answers punchy.`;
 
 export async function generateAnswer(
   question: string,
@@ -141,7 +148,7 @@ Please answer the question based on the thread conversation history and context 
     answer = msg.content[0].type === 'text' ? msg.content[0].text : '';
   } else if (env.LLM_PROVIDER === 'gemini') {
     const candidateModels = Array.from(
-      new Set([env.LLM_MODEL, 'gemini-3.5-flash-lite', 'gemini-2.5-flash'])
+      new Set([env.LLM_MODEL, 'gemini-2.5-flash', 'gemini-2.5-pro'])
     );
     let lastError: unknown = null;
     let success = false;
@@ -317,3 +324,225 @@ Format for WhatsApp. Be brief.`;
     return completion.choices[0]?.message?.content ?? '';
   }
 }
+
+/**
+ * Generate Catch-Up response ("What did I miss?")
+ */
+export async function generateCatchUp(
+  timeframeLabel: string,
+  chunks: RetrievedChunk[],
+  userName?: string
+): Promise<CatchUpResult> {
+  const env = getEnv();
+
+  const contextStr = chunks
+    .map((c) => {
+      const meta = c.metadata as ChunkMetadata;
+      const who = meta.sender_name ?? meta.speaker ?? meta.sender ?? 'Unknown';
+      const when = meta.date ? new Date(meta.date).toLocaleString() : '';
+      return `[${meta.source_type.toUpperCase()} | ${when} | ${who}]: ${c.text}`;
+    })
+    .join('\n');
+
+  const prompt = `You are Zeus Bot. The user${userName ? ` (${userName})` : ''} asks: "What did I miss ${timeframeLabel}?"
+
+Here are the retrieved group messages, meeting transcripts, and documents from that period:
+${contextStr}
+
+Return a valid JSON object matching this structure (no markdown formatting around the JSON):
+{
+  "timeframe": "${timeframeLabel}",
+  "summary": "Short 2-sentence executive catch-up overview.",
+  "important_conversations": [
+    { "topic": "...", "summary": "...", "participants": ["..."] }
+  ],
+  "missed_meetings": [
+    { "title": "...", "date": "...", "summary": "...", "decisions_count": 0 }
+  ],
+  "key_decisions": [
+    { "decision": "...", "context": "...", "agreed_by": "..." }
+  ],
+  "action_items": [
+    { "task": "...", "assignee": "...", "due_date": "..." }
+  ],
+  "personal_mentions": [
+    { "sender": "...", "snippet": "...", "timestamp": "..." }
+  ]
+}`;
+
+  let rawJson = '';
+  if (env.LLM_PROVIDER === 'gemini') {
+    const model = getGemini().getGenerativeModel({
+      model: env.LLM_MODEL,
+      systemInstruction: 'Output strictly raw JSON without markdown code fences.',
+    });
+    const result = await model.generateContent(prompt);
+    rawJson = result.response.text();
+  } else if (env.LLM_PROVIDER === 'anthropic') {
+    const msg = await getAnthropic().messages.create({
+      model: env.LLM_MODEL,
+      max_tokens: 1200,
+      system: 'Output strictly raw JSON without markdown code fences.',
+      messages: [{ role: 'user', content: prompt }],
+    });
+    rawJson = msg.content[0].type === 'text' ? msg.content[0].text : '';
+  } else {
+    const completion = await getOpenAI().chat.completions.create({
+      model: env.LLM_MODEL,
+      max_tokens: 1200,
+      messages: [
+        { role: 'system', content: 'Output strictly raw JSON without markdown code fences.' },
+        { role: 'user', content: prompt },
+      ],
+    });
+    rawJson = completion.choices[0]?.message?.content ?? '';
+  }
+
+  try {
+    const cleaned = rawJson.replace(/```json/gi, '').replace(/```/g, '').trim();
+    return JSON.parse(cleaned) as CatchUpResult;
+  } catch (err) {
+    console.warn('⚠️ Failed to parse JSON catch-up response, building fallback structure', err);
+    return {
+      timeframe: timeframeLabel,
+      summary: rawJson.slice(0, 300) || 'Here is what happened recently in the group.',
+      important_conversations: [],
+      missed_meetings: [],
+      key_decisions: [],
+      action_items: [],
+      personal_mentions: [],
+    };
+  }
+}
+
+/**
+ * Generate Meeting Intelligence (Summary, Decisions, Action Items, Speaker Mentions)
+ */
+export async function generateMeetingIntelligence(
+  callId: string,
+  chunks: RetrievedChunk[]
+): Promise<MeetingIntelligenceResult> {
+  const env = getEnv();
+
+  const transcriptStr = chunks
+    .map((c) => {
+      const meta = c.metadata as ChunkMetadata;
+      const speaker = meta.speaker ?? 'Speaker';
+      return `${speaker}: ${c.text}`;
+    })
+    .join('\n');
+
+  const prompt = `You are Zeus Bot analyzing a meeting transcript (Call ID: ${callId}).
+
+Transcript snippet:
+${transcriptStr}
+
+Return a valid JSON object matching this structure (no markdown fences):
+{
+  "call_id": "${callId}",
+  "title": "Meeting Title / Topic",
+  "date": "${new Date().toLocaleDateString('en-GB')}",
+  "duration_mins": 30,
+  "participants": ["..."],
+  "summary": "Short comprehensive overview of what was discussed.",
+  "decisions": ["Decision 1", "Decision 2"],
+  "action_items": [{ "assignee": "Name", "task": "Task description" }],
+  "speaker_mentions": [{ "speaker": "Name", "count": 1 }]
+}`;
+
+  let rawJson = '';
+  if (env.LLM_PROVIDER === 'gemini') {
+    const model = getGemini().getGenerativeModel({
+      model: env.LLM_MODEL,
+      systemInstruction: 'Output strictly raw JSON without markdown code fences.',
+    });
+    const result = await model.generateContent(prompt);
+    rawJson = result.response.text();
+  } else {
+    const completion = await getOpenAI().chat.completions.create({
+      model: env.LLM_MODEL,
+      max_tokens: 1000,
+      messages: [
+        { role: 'system', content: 'Output strictly raw JSON without markdown code fences.' },
+        { role: 'user', content: prompt },
+      ],
+    });
+    rawJson = completion.choices[0]?.message?.content ?? '';
+  }
+
+  try {
+    const cleaned = rawJson.replace(/```json/gi, '').replace(/```/g, '').trim();
+    return JSON.parse(cleaned) as MeetingIntelligenceResult;
+  } catch (err) {
+    return {
+      call_id: callId,
+      title: `Call ${callId}`,
+      date: new Date().toLocaleDateString('en-GB'),
+      participants: [],
+      summary: rawJson.slice(0, 300),
+      decisions: [],
+      action_items: [],
+      speaker_mentions: [],
+    };
+  }
+}
+
+/**
+ * Evaluate if multiple group members are asking similar questions or confused.
+ * Used for Zeus Bot proactive intervention without explicit tag.
+ */
+export async function detectGroupConfusion(
+  recentMessages: { sender_name: string; text: string; timestamp: Date }[]
+): Promise<ConfusionAssessment> {
+  if (recentMessages.length < 2) {
+    return { is_confused: false, confidence: 0 };
+  }
+
+  const env = getEnv();
+  const textBlock = recentMessages
+    .map((m) => `${m.sender_name}: ${m.text}`)
+    .join('\n');
+
+  const prompt = `Analyze this recent sequence of group messages:
+
+${textBlock}
+
+Determine if multiple people are asking similar questions or expressing confusion about a specific topic (e.g. deadline, link, decision, meeting time).
+
+Return JSON only (no markdown fences):
+{
+  "is_confused": true or false,
+  "topic": "topic causing confusion",
+  "reason": "why they are confused",
+  "confidence": 0.0 to 1.0,
+  "suggested_answer_query": "search query to look up in Zeus memory bank"
+}`;
+
+  try {
+    let raw = '';
+    if (env.LLM_PROVIDER === 'gemini') {
+      const model = getGemini().getGenerativeModel({
+        model: env.LLM_MODEL,
+        systemInstruction: 'Output JSON only.',
+      });
+      const res = await model.generateContent(prompt);
+      raw = res.response.text();
+    } else {
+      const completion = await getOpenAI().chat.completions.create({
+        model: env.LLM_MODEL,
+        max_tokens: 300,
+        messages: [
+          { role: 'system', content: 'Output JSON only.' },
+          { role: 'user', content: prompt },
+        ],
+      });
+      raw = completion.choices[0]?.message?.content ?? '';
+    }
+
+    const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+    return JSON.parse(cleaned) as ConfusionAssessment;
+  } catch (err) {
+    return { is_confused: false, confidence: 0 };
+  }
+}
+

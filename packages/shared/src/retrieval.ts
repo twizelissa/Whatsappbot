@@ -302,3 +302,62 @@ export async function getRecentThreadHistory(
     })
     .join('\n');
 }
+
+/**
+ * Get chunks for Catch-Up summary within a relative hours window (e.g. 24h, 48h, 168h)
+ */
+export async function getCatchUpChunks(
+  groupId?: string,
+  hours = 24,
+  limit = 50
+): Promise<RetrievedChunk[]> {
+  const since = new Date(Date.now() - hours * 3600 * 1000);
+
+  const conditions: string[] = ["created_at >= $1", "text != ''"];
+  const params: unknown[] = [since, limit];
+  let paramIdx = 3;
+
+  if (groupId) {
+    conditions.push(`metadata->>'group_id' = $${paramIdx++}`);
+    params.push(groupId);
+  }
+
+  const whereClause = `WHERE ${conditions.join(' AND ')}`;
+
+  const rows = await query<RetrievedChunk>(
+    `SELECT id, source_id, source_type, text, metadata, created_at
+     FROM chunks
+     ${whereClause}
+     ORDER BY created_at DESC
+     LIMIT $2`,
+    params
+  );
+
+  return rows.reverse().map((r) => ({
+    ...r,
+    similarity: 0.9,
+    metadata: typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata,
+  }));
+}
+
+/**
+ * Get transcript chunks for a specific meeting / call
+ */
+export async function getMeetingChunks(
+  callId: string
+): Promise<RetrievedChunk[]> {
+  const rows = await query<RetrievedChunk>(
+    `SELECT id, source_id, source_type, text, metadata, created_at
+     FROM chunks
+     WHERE source_type = 'transcript' AND (metadata->>'call_id' = $1 OR metadata->>'title' ILIKE $2)
+     ORDER BY created_at ASC`,
+    [callId, `%${callId}%`]
+  );
+
+  return rows.map((r) => ({
+    ...r,
+    similarity: 1.0,
+    metadata: typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata,
+  }));
+}
+

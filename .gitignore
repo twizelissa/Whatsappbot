@@ -8,3 +8,5 @@ recordings/processed/
 *.log
 *.tsbuildinfo
 .DS_Store
+*.zip
+*.pdf

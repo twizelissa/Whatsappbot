@@ -1,6 +1,6 @@
 import express from 'express';
-import { startBaileysListener } from './listener';
-import getEnv from '@unipods/shared/src/config';
+import { startBaileysListener, joinGroup, getActiveGroupsInfo, restartBaileysListener } from './listener';
+import { getEnv } from '@unipods/shared';
 import pino from 'pino';
 
 const logger = pino({ level: 'info', transport: { target: 'pino-pretty' } });
@@ -16,8 +16,30 @@ async function main(): Promise<void> {
 
   // Health check server & Web QR Code viewer
   const app = express();
+  app.use(express.json());
+
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok', service: 'ingestion', timestamp: new Date().toISOString() });
+  });
+
+  app.get('/groups', (_req, res) => {
+    const groups = getActiveGroupsInfo();
+    res.json({ count: groups.length, groups });
+  });
+
+  app.post('/join-group', async (req, res) => {
+    const { invite_link } = req.body;
+    if (!invite_link) {
+      return res.status(400).json({ success: false, message: 'invite_link is required' });
+    }
+    const result = await joinGroup(invite_link);
+    res.json(result);
+  });
+
+  app.post('/restart', async (_req, res) => {
+    logger.info('🔄 Received restart request via HTTP');
+    const result = await restartBaileysListener();
+    res.json(result);
   });
 
   app.get('/qr', (_req, res) => {
