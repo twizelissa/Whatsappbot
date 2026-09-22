@@ -41,6 +41,29 @@ function getGemini(): GoogleGenerativeAI {
   return _gemini;
 }
 
+export async function callGeminiContent(prompt: string, systemInstruction?: string): Promise<string> {
+  const env = getEnv();
+  const candidateModels = Array.from(
+    new Set([env.LLM_MODEL, 'gemini-2.5-flash', 'gemini-flash-latest'])
+  );
+
+  let lastError: unknown = null;
+  for (const modelName of candidateModels) {
+    try {
+      const model = getGemini().getGenerativeModel({
+        model: modelName,
+        ...(systemInstruction ? { systemInstruction } : {}),
+      });
+      const result = await model.generateContent(prompt);
+      return result.response.text();
+    } catch (err) {
+      lastError = err;
+      console.warn(`⚠️ Gemini model ${modelName} failed, attempting fallback...`);
+    }
+  }
+  throw lastError;
+}
+
 const ALLOWED_EMOJIS = new Set([
   '😂', '😤', '🔥', '🥳', '🙆🏽‍♀️', '👏🏽', '🤗', '😉', '🤔', '🤣', '🙏', '😎', '🤷🏽‍♀️', '🤷‍♀️', '😁', '😅', '😭', '🤫', '🫡'
 ]);
@@ -193,32 +216,7 @@ Please answer the question accurately based on group context or web search resul
     });
     answer = msg.content[0].type === 'text' ? msg.content[0].text : '';
   } else if (env.LLM_PROVIDER === 'gemini') {
-    const candidateModels = Array.from(
-      new Set([env.LLM_MODEL, 'gemini-2.5-flash', 'gemini-2.5-pro'])
-    );
-    let lastError: unknown = null;
-    let success = false;
-    answer = '';
-
-    for (const modelName of candidateModels) {
-      try {
-        const model = getGemini().getGenerativeModel({
-          model: modelName,
-          systemInstruction: SYSTEM_PROMPT,
-        });
-        const result = await model.generateContent(userPrompt);
-        answer = result.response.text();
-        success = true;
-        break;
-      } catch (err) {
-        lastError = err;
-        console.warn(`⚠️ Gemini model ${modelName} failed, attempting fallback...`);
-      }
-    }
-
-    if (!success) {
-      throw lastError;
-    }
+    answer = await callGeminiContent(userPrompt, SYSTEM_PROMPT);
   } else {
     const completion = await getOpenAI().chat.completions.create({
       model: env.LLM_MODEL,
@@ -297,12 +295,7 @@ Keep it brief and scannable. Format for WhatsApp (no markdown headers).`;
     });
     return msg.content[0].type === 'text' ? msg.content[0].text : '';
   } else if (env.LLM_PROVIDER === 'gemini') {
-    const model = getGemini().getGenerativeModel({
-      model: env.LLM_MODEL,
-      systemInstruction: 'You are a helpful group chat digest creator. Be concise and scannable.',
-    });
-    const result = await model.generateContent(prompt);
-    return result.response.text();
+    return await callGeminiContent(prompt, 'You are a helpful group chat digest creator. Be concise and scannable.');
   } else {
     const completion = await getOpenAI().chat.completions.create({
       model: env.LLM_MODEL,
@@ -355,12 +348,7 @@ Format for WhatsApp. Be brief.`;
     });
     return msg.content[0].type === 'text' ? msg.content[0].text : '';
   } else if (env.LLM_PROVIDER === 'gemini') {
-    const model = getGemini().getGenerativeModel({
-      model: env.LLM_MODEL,
-      systemInstruction: 'You are creating a call recap for a WhatsApp group. Be concise.',
-    });
-    const result = await model.generateContent(prompt);
-    return result.response.text();
+    return await callGeminiContent(prompt, 'You are creating a call recap for a WhatsApp group. Be concise.');
   } else {
     const completion = await getOpenAI().chat.completions.create({
       model: env.LLM_MODEL,
@@ -421,12 +409,7 @@ Return a valid JSON object matching this structure (no markdown formatting aroun
 
   let rawJson = '';
   if (env.LLM_PROVIDER === 'gemini') {
-    const model = getGemini().getGenerativeModel({
-      model: env.LLM_MODEL,
-      systemInstruction: 'Output strictly raw JSON without markdown code fences.',
-    });
-    const result = await model.generateContent(prompt);
-    rawJson = result.response.text();
+    rawJson = await callGeminiContent(prompt, 'Output strictly raw JSON without markdown code fences.');
   } else if (env.LLM_PROVIDER === 'anthropic') {
     const msg = await getAnthropic().messages.create({
       model: env.LLM_MODEL,
@@ -501,12 +484,7 @@ Return a valid JSON object matching this structure (no markdown fences):
 
   let rawJson = '';
   if (env.LLM_PROVIDER === 'gemini') {
-    const model = getGemini().getGenerativeModel({
-      model: env.LLM_MODEL,
-      systemInstruction: 'Output strictly raw JSON without markdown code fences.',
-    });
-    const result = await model.generateContent(prompt);
-    rawJson = result.response.text();
+    rawJson = await callGeminiContent(prompt, 'Output strictly raw JSON without markdown code fences.');
   } else {
     const completion = await getOpenAI().chat.completions.create({
       model: env.LLM_MODEL,
@@ -570,12 +548,7 @@ Return JSON only (no markdown fences):
   try {
     let raw = '';
     if (env.LLM_PROVIDER === 'gemini') {
-      const model = getGemini().getGenerativeModel({
-        model: env.LLM_MODEL,
-        systemInstruction: 'Output JSON only.',
-      });
-      const res = await model.generateContent(prompt);
-      raw = res.response.text();
+      raw = await callGeminiContent(prompt, 'Output JSON only.');
     } else {
       const completion = await getOpenAI().chat.completions.create({
         model: env.LLM_MODEL,
