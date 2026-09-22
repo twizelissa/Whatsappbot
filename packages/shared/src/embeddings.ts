@@ -71,13 +71,24 @@ async function embedOpenAI(texts: string[]): Promise<number[][]> {
 
 async function embedGemini(texts: string[]): Promise<number[][]> {
   const env = getEnv();
-  const model = getGeminiClient().getGenerativeModel({ model: env.EMBEDDING_MODEL });
+  const rawModel = env.EMBEDDING_MODEL || 'gemini-embedding-001';
+  const targetModel = rawModel === 'text-embedding-004' ? 'gemini-embedding-001' : rawModel;
+  const model = getGeminiClient().getGenerativeModel({ model: targetModel });
   const results: number[][] = [];
 
-  // Gemini embedding API processes one text at a time
   for (const text of texts) {
-    const result = await model.embedContent(text);
-    results.push(result.embedding.values);
+    try {
+      const result = await model.embedContent(text);
+      results.push(result.embedding.values);
+    } catch (err: any) {
+      if (String(err).includes('404') || String(err).includes('not found')) {
+        const fallbackModel = getGeminiClient().getGenerativeModel({ model: 'gemini-embedding-001' });
+        const res = await fallbackModel.embedContent(text);
+        results.push(res.embedding.values);
+      } else {
+        throw err;
+      }
+    }
   }
 
   return results;

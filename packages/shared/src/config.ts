@@ -29,7 +29,7 @@ const envSchema = z.object({
 
   // Embeddings
   EMBEDDING_PROVIDER: z.enum(['openai', 'gemini', 'local']).default('gemini'),
-  EMBEDDING_MODEL: z.string().default('text-embedding-004'),
+  EMBEDDING_MODEL: z.string().default('gemini-embedding-001'),
   EMBEDDING_DIMENSIONS: z.string().transform(Number).default('768'),
 
   // Whisper
