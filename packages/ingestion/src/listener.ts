@@ -14,7 +14,7 @@ import fs from 'fs';
 import qrcodeTerminal from 'qrcode-terminal';
 import QRCode from 'qrcode';
 import { updateLatestQr } from './index';
-import { ingestMessage, detectGroupConfusion, Message, GroupInfo } from '@unipods/shared';
+import { ingestMessage, detectGroupConfusion, Message, GroupInfo, query } from '@unipods/shared';
 
 function getEnv() {
   const shared = require('@unipods/shared');
@@ -151,9 +151,59 @@ export async function restartBaileysListener(): Promise<{ success: boolean; mess
   }
 }
 
+async function syncAuthFromDb(authDir: string): Promise<void> {
+  try {
+    if (!fs.existsSync(authDir)) {
+      fs.mkdirSync(authDir, { recursive: true });
+    }
+    const rows = await query<{ id: string; value: unknown }>(
+      `SELECT id, value FROM baileys_auth`
+    );
+    if (rows && rows.length > 0) {
+      let restoredCount = 0;
+      for (const row of rows) {
+        const filePath = path.join(authDir, row.id);
+        const jsonContent = typeof row.value === 'string' ? row.value : JSON.stringify(row.value, null, 2);
+        fs.writeFileSync(filePath, jsonContent, 'utf-8');
+        restoredCount++;
+      }
+      logger.info({ count: restoredCount }, '⚡ Restored WhatsApp auth session from Supabase DB');
+    }
+  } catch (err) {
+    logger.warn({ err }, '⚠️ Could not restore auth session from Supabase DB');
+  }
+}
+
+async function syncAuthToDb(authDir: string): Promise<void> {
+  try {
+    if (!fs.existsSync(authDir)) return;
+    const files = fs.readdirSync(authDir).filter((f) => f.endsWith('.json'));
+    for (const file of files) {
+      const filePath = path.join(authDir, file);
+      try {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const jsonValue = JSON.parse(content);
+        await query(
+          `INSERT INTO baileys_auth (id, value, updated_at)
+           VALUES ($1, $2, NOW())
+           ON CONFLICT (id) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+          [file, JSON.stringify(jsonValue)]
+        );
+      } catch {}
+    }
+    logger.info({ fileCount: files.length }, '💾 Persisted WhatsApp auth session to Supabase DB');
+  } catch (err) {
+    logger.warn({ err }, '⚠️ Could not save auth session to Supabase DB');
+  }
+}
+
 export async function startBaileysListener(): Promise<void> {
   const env = getEnv();
   let targetGroupJids = new Set<string>();
+
+  // Restore existing session from Supabase DB if available
+  await syncAuthFromDb(AUTH_DIR);
+
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version, isLatest } = await fetchLatestBaileysVersion();
 
@@ -175,7 +225,10 @@ export async function startBaileysListener(): Promise<void> {
     getMessage: async () => undefined,
   });
 
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('creds.update', async () => {
+    await saveCreds();
+    await syncAuthToDb(AUTH_DIR);
+  });
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
@@ -205,8 +258,11 @@ export async function startBaileysListener(): Promise<void> {
         logger.info(`Reconnecting in ${Math.round(delay)}ms (attempt ${retryCount})...`);
         setTimeout(() => startBaileysListener(), delay);
       } else {
-        logger.error('❌ Logged out. Delete auth folder and restart to re-pair.');
+        logger.error('❌ Logged out. Delete auth folder and DB session...');
         fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+        try {
+          await query(`DELETE FROM baileys_auth`);
+        } catch {}
         process.exit(1);
       }
     }
@@ -216,7 +272,8 @@ export async function startBaileysListener(): Promise<void> {
     if (connection === 'open') {
       retryCount = 0;
       updateLatestQr(null);
-      logger.info('✅ WhatsApp connection established for Zeus Bot');
+      await syncAuthToDb(AUTH_DIR);
+      logger.info('✅ WhatsApp connection established for Zeus Bot (Auth saved to Supabase DB)');
 
       let groups: Record<string, GroupMetadata> = {};
       try {
