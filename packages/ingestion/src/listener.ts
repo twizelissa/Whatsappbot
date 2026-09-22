@@ -485,7 +485,7 @@ async function processMessage(
     const now = Date.now();
     const lastTime = lastInterventionTime.get(jid) ?? 0;
     if (now - lastTime > 300000 && buffer.length >= 2) {
-      detectGroupConfusion(buffer).then((assessment) => {
+      detectGroupConfusion(buffer).then((assessment: any) => {
         if (assessment.is_confused && assessment.confidence >= 0.7 && assessment.suggested_answer_query) {
           logger.info({ assessment, jid }, '⚡ Zeus Bot detected group confusion — stepping in proactively!');
           lastInterventionTime.set(jid, now);
@@ -495,9 +495,9 @@ async function processMessage(
             groupJid: jid,
             quotedMsg: msg,
             sock,
-          }).catch((err) => logger.error({ err }, 'Failed to post proactive intervention'));
+          }).catch((err: any) => logger.error({ err }, 'Failed to post proactive intervention'));
         }
-      }).catch((err) => logger.warn({ err }, 'Confusion detection check error'));
+      }).catch((err: any) => logger.warn({ err }, 'Confusion detection check error'));
     }
   }
 

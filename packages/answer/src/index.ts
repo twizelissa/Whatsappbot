@@ -173,7 +173,7 @@ async function handleQuestion(
       answerResult.confidence,
       isDuplicate,
       JSON.stringify(answerResult.sources),
-      chunks.map((c) => c.id),
+      chunks.map((c: any) => c.id),
     ]
   );
 
@@ -302,7 +302,7 @@ async function getGroupsFromDatabase(): Promise<{ jid: string; subject: string; 
 
   // 3. Fallback to env.GROUP_ID if set
   if (groupsMap.size === 0 && env.GROUP_ID) {
-    const items = env.GROUP_ID.split(',').map((s) => s.trim()).filter(Boolean);
+    const items = env.GROUP_ID.split(',').map((s: string) => s.trim()).filter(Boolean);
     for (const item of items) {
       groupsMap.set(item, {
         jid: item,

@@ -11,7 +11,8 @@ RUN npm run build --workspace=packages/shared --workspace=packages/scheduler
 FROM node:20-alpine
 WORKDIR /app
 ENV NODE_ENV=production
+COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/packages/shared ./packages/shared
+COPY --from=builder /app/packages/scheduler ./packages/scheduler
 COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
-COPY --from=builder /app/packages/scheduler/dist ./packages/scheduler/dist
 CMD ["node", "packages/scheduler/dist/scheduler/src/index.js"]
