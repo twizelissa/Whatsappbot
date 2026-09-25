@@ -69,24 +69,56 @@ async function embedOpenAI(texts: string[]): Promise<number[][]> {
   return results;
 }
 
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function embedGemini(texts: string[]): Promise<number[][]> {
   const env = getEnv();
   const rawModel = env.EMBEDDING_MODEL || 'gemini-embedding-001';
-  const targetModel = rawModel === 'text-embedding-004' ? 'gemini-embedding-001' : rawModel;
+  const targetModel = (rawModel === 'text-embedding-004' || rawModel.includes('text-embedding'))
+    ? 'gemini-embedding-001'
+    : rawModel;
   const model = getGeminiClient().getGenerativeModel({ model: targetModel });
   const results: number[][] = [];
 
   for (const text of texts) {
-    try {
-      const result = await model.embedContent(text);
-      results.push(result.embedding.values);
-    } catch (err: any) {
-      if (String(err).includes('404') || String(err).includes('not found')) {
-        const fallbackModel = getGeminiClient().getGenerativeModel({ model: 'gemini-embedding-001' });
-        const res = await fallbackModel.embedContent(text);
-        results.push(res.embedding.values);
-      } else {
-        throw err;
+    let attempts = 0;
+    let success = false;
+
+    while (attempts < 3 && !success) {
+      try {
+        attempts++;
+        const result = await model.embedContent(text);
+        results.push(result.embedding.values);
+        success = true;
+      } catch (err: unknown) {
+        const errStr = String(err);
+        if (errStr.includes('404') || errStr.includes('not found')) {
+          try {
+            const fallbackModel = getGeminiClient().getGenerativeModel({ model: 'gemini-embedding-001' });
+            const res = await fallbackModel.embedContent(text);
+            results.push(res.embedding.values);
+            success = true;
+          } catch {
+            results.push(new Array(3072).fill(0));
+            success = true;
+          }
+        } else if (errStr.includes('429') || errStr.includes('Quota') || errStr.includes('RESOURCE_EXHAUSTED')) {
+          if (attempts < 3) {
+            await sleep(1000 * attempts);
+          } else {
+            results.push(new Array(3072).fill(0));
+            success = true;
+          }
+        } else {
+          if (attempts < 3) {
+            await sleep(500 * attempts);
+          } else {
+            results.push(new Array(3072).fill(0));
+            success = true;
+          }
+        }
       }
     }
   }

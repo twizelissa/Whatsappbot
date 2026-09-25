@@ -47,21 +47,29 @@ function getGemini(): GoogleGenerativeAI {
 export async function callGeminiContent(prompt: string, systemInstruction?: string): Promise<string> {
   const env = getEnv();
   const candidateModels = Array.from(
-    new Set([env.LLM_MODEL, 'gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-1.5-flash', 'gemini-flash-latest'])
+    new Set([env.LLM_MODEL, 'gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-flash-latest'])
   );
 
   let lastError: unknown = null;
   for (const modelName of candidateModels) {
-    try {
-      const model = getGemini().getGenerativeModel({
-        model: modelName,
-        ...(systemInstruction ? { systemInstruction } : {}),
-      });
-      const result = await model.generateContent(prompt);
-      return result.response.text();
-    } catch (err) {
-      lastError = err;
-      console.warn(`⚠️ Gemini model ${modelName} failed, attempting fallback...`);
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const model = getGemini().getGenerativeModel({
+          model: modelName,
+          ...(systemInstruction ? { systemInstruction } : {}),
+        });
+        const result = await model.generateContent(prompt);
+        return result.response.text();
+      } catch (err) {
+        lastError = err;
+        const errStr = String(err);
+        if (errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED') || errStr.includes('Quota')) {
+          console.warn(`⚠️ Gemini model ${modelName} rate limited (attempt ${attempt}/2), waiting 1.5s...`);
+          await new Promise((r) => setTimeout(r, 1500 * attempt));
+        } else {
+          break; // move to next model if not a rate limit error
+        }
+      }
     }
   }
   throw lastError;
