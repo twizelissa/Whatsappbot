@@ -90,21 +90,26 @@ async function vectorSearch(
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-  const rows = await query<RetrievedChunk & { similarity: number }>(
-    `SELECT
-       id, source_id, source_type, text, metadata, created_at,
-       1 - (embedding <=> $1::vector) AS similarity
-     FROM chunks
-     ${whereClause}
-     ORDER BY embedding <=> $1::vector
-     LIMIT $2`,
-    params
-  );
+  try {
+    const rows = await query<RetrievedChunk & { similarity: number }>(
+      `SELECT
+         id, source_id, source_type, text, metadata, created_at,
+         1 - (embedding <=> $1::vector) AS similarity
+       FROM chunks
+       ${whereClause}
+       ORDER BY embedding <=> $1::vector
+       LIMIT $2`,
+      params
+    );
 
-  return rows.map((r) => ({
-    ...r,
-    metadata: typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata,
-  }));
+    return rows.map((r) => ({
+      ...r,
+      metadata: typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata,
+    }));
+  } catch (err) {
+    console.warn('⚠️ Vector similarity query failed, falling back to keyword search:', err);
+    return [];
+  }
 }
 
 async function keywordSearch(
@@ -205,25 +210,29 @@ export async function findDuplicateQuestion(
   question: string,
   threshold = 0.85
 ): Promise<{ context: string; date: string } | null> {
-  const embedding = await embedOne(question);
+  try {
+    const embedding = await embedOne(question);
 
-  const rows = await query<{ text: string; metadata: ChunkMetadata; similarity: number }>(
-    `SELECT text, metadata, 1 - (embedding <=> $1::vector) AS similarity
-     FROM chunks
-     WHERE source_type = 'message'
-       AND metadata->>'is_question' = 'true'
-       AND embedding IS NOT NULL
-     ORDER BY embedding <=> $1::vector
-     LIMIT 3`,
-    [toVectorString(embedding)]
-  );
+    const rows = await query<{ text: string; metadata: ChunkMetadata; similarity: number }>(
+      `SELECT text, metadata, 1 - (embedding <=> $1::vector) AS similarity
+       FROM chunks
+       WHERE source_type = 'message'
+         AND metadata->>'is_question' = 'true'
+         AND embedding IS NOT NULL
+       ORDER BY embedding <=> $1::vector
+       LIMIT 3`,
+      [toVectorString(embedding)]
+    );
 
-  const match = rows[0];
-  if (match && match.similarity >= threshold) {
-    return {
-      context: match.text,
-      date: (match.metadata as ChunkMetadata).date,
-    };
+    const match = rows[0];
+    if (match && match.similarity >= threshold) {
+      return {
+        context: match.text,
+        date: (match.metadata as ChunkMetadata).date,
+      };
+    }
+  } catch (err) {
+    console.warn('⚠️ Duplicate question vector check warning:', err);
   }
 
   return null;
