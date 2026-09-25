@@ -28,35 +28,45 @@ function getGeminiClient(): GoogleGenerativeAI {
  */
 function getTargetDimensions(): number {
   const env = getEnv();
-  return env.EMBEDDING_DIMENSIONS || 768;
+  return env.EMBEDDING_DIMENSIONS || 3072;
+}
+
+function padOrTrimVector(vec: number[], targetDim: number): number[] {
+  if (!vec || !Array.isArray(vec)) return new Array(targetDim).fill(0);
+  if (vec.length === targetDim) return vec;
+  if (vec.length > targetDim) return vec.slice(0, targetDim);
+  const result = new Array(targetDim).fill(0);
+  for (let i = 0; i < vec.length; i++) {
+    result[i] = vec[i];
+  }
+  return result;
 }
 
 export async function embed(texts: string[]): Promise<number[][]> {
   const env = getEnv();
+  const dim = getTargetDimensions();
 
+  let rawResults: number[][] = [];
   try {
     if (env.EMBEDDING_PROVIDER === 'gemini' && env.GEMINI_API_KEY) {
-      return await embedGemini(texts);
-    }
-
-    if (env.EMBEDDING_PROVIDER === 'openai' && env.OPENAI_API_KEY) {
-      return await embedOpenAI(texts);
-    }
-
-    if (env.GEMINI_API_KEY) {
-      return await embedGemini(texts);
-    }
-
-    if (env.OPENAI_API_KEY) {
-      return await embedOpenAI(texts);
+      rawResults = await embedGemini(texts);
+    } else if (env.EMBEDDING_PROVIDER === 'openai' && env.OPENAI_API_KEY) {
+      rawResults = await embedOpenAI(texts);
+    } else if (env.GEMINI_API_KEY) {
+      rawResults = await embedGemini(texts);
+    } else if (env.OPENAI_API_KEY) {
+      rawResults = await embedOpenAI(texts);
     }
   } catch (err) {
     console.warn('⚠️ Embedding generation error, using zero-vector fallback:', err);
   }
 
-  // Safe fallback: zero vector matching target dimension (default 768)
-  const dim = getTargetDimensions();
-  return texts.map(() => new Array(dim).fill(0));
+  if (rawResults.length === 0) {
+    rawResults = texts.map(() => new Array(dim).fill(0));
+  }
+
+  // Ensure 100% vector dimension compliance (3072) for every single vector
+  return rawResults.map((v) => padOrTrimVector(v, dim));
 }
 
 export async function embedOne(text: string): Promise<number[]> {
