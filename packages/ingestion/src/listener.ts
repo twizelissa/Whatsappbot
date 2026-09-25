@@ -761,10 +761,7 @@ async function askAndReplyInGroup({
       logger.error({ directErr }, 'Direct Q&A fallback failed');
       const errDetail = directErr instanceof Error ? directErr.message : String(directErr);
       
-      let errorMsg = `Zeus Bot: I received your query, but encountered an issue: ${errDetail}`;
-      if (errDetail.includes('429') || errDetail.toLowerCase().includes('quota') || errDetail.toLowerCase().includes('rate limit') || errDetail.toLowerCase().includes('resourceexhausted')) {
-        errorMsg = `⏳ *Token / Quota Limit Reached*: Gemini API rate limit or token quota exceeded. Please wait 30 seconds before asking again.`;
-      }
+      const errorMsg = `⚡ *Zeus Bot*: I received your query, but encountered an issue: ${errDetail}`;
 
       data = {
         answer: errorMsg,

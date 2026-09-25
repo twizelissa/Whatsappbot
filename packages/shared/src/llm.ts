@@ -30,6 +30,10 @@ function getOpenAI(): OpenAI {
     _openai = new OpenAI({
       apiKey: env.OPENAI_API_KEY,
       ...(env.OPENAI_BASE_URL ? { baseURL: env.OPENAI_BASE_URL } : {}),
+      defaultHeaders: {
+        'HTTP-Referer': 'https://github.com/twizelissa/Whatsappbot',
+        'X-Title': 'UniPods WhatsApp Bot',
+      },
     });
   }
   return _openai;
