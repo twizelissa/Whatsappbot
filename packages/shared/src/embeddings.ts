@@ -26,6 +26,11 @@ function getGeminiClient(): GoogleGenerativeAI {
  * Generate embeddings for one or more text strings.
  * Returns an array of embedding vectors.
  */
+function getTargetDimensions(): number {
+  const env = getEnv();
+  return env.EMBEDDING_DIMENSIONS || 768;
+}
+
 export async function embed(texts: string[]): Promise<number[][]> {
   const env = getEnv();
 
@@ -49,8 +54,9 @@ export async function embed(texts: string[]): Promise<number[][]> {
     console.warn('⚠️ Embedding generation error, using zero-vector fallback:', err);
   }
 
-  // Safe fallback: zero vector of dimension 3072
-  return texts.map(() => new Array(3072).fill(0));
+  // Safe fallback: zero vector matching target dimension (default 768)
+  const dim = getTargetDimensions();
+  return texts.map(() => new Array(dim).fill(0));
 }
 
 export async function embedOne(text: string): Promise<number[]> {
@@ -71,7 +77,7 @@ async function embedOpenAI(texts: string[]): Promise<number[][]> {
     const res = await openai.embeddings.create({
       model: env.EMBEDDING_MODEL,
       input: batch,
-      dimensions: env.EMBEDDING_DIMENSIONS,
+      dimensions: getTargetDimensions(),
     });
     for (const item of res.data) {
       results.push(item.embedding);
@@ -93,6 +99,7 @@ async function embedGemini(texts: string[]): Promise<number[][]> {
     : rawModel;
   const model = getGeminiClient().getGenerativeModel({ model: targetModel });
   const results: number[][] = [];
+  const dim = getTargetDimensions();
 
   for (const text of texts) {
     let attempts = 0;
@@ -113,21 +120,21 @@ async function embedGemini(texts: string[]): Promise<number[][]> {
             results.push(res.embedding.values);
             success = true;
           } catch {
-            results.push(new Array(3072).fill(0));
+            results.push(new Array(dim).fill(0));
             success = true;
           }
         } else if (errStr.includes('429') || errStr.includes('Quota') || errStr.includes('RESOURCE_EXHAUSTED')) {
           if (attempts < 3) {
             await sleep(1000 * attempts);
           } else {
-            results.push(new Array(3072).fill(0));
+            results.push(new Array(dim).fill(0));
             success = true;
           }
         } else {
           if (attempts < 3) {
             await sleep(500 * attempts);
           } else {
-            results.push(new Array(3072).fill(0));
+            results.push(new Array(dim).fill(0));
             success = true;
           }
         }
