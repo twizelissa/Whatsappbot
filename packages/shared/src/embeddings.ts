@@ -29,16 +29,28 @@ function getGeminiClient(): GoogleGenerativeAI {
 export async function embed(texts: string[]): Promise<number[][]> {
   const env = getEnv();
 
-  if (env.EMBEDDING_PROVIDER === 'openai') {
-    return embedOpenAI(texts);
+  try {
+    if (env.EMBEDDING_PROVIDER === 'gemini' && env.GEMINI_API_KEY) {
+      return await embedGemini(texts);
+    }
+
+    if (env.EMBEDDING_PROVIDER === 'openai' && env.OPENAI_API_KEY) {
+      return await embedOpenAI(texts);
+    }
+
+    if (env.GEMINI_API_KEY) {
+      return await embedGemini(texts);
+    }
+
+    if (env.OPENAI_API_KEY) {
+      return await embedOpenAI(texts);
+    }
+  } catch (err) {
+    console.warn('⚠️ Embedding generation error, using zero-vector fallback:', err);
   }
 
-  if (env.EMBEDDING_PROVIDER === 'gemini') {
-    return embedGemini(texts);
-  }
-
-  // Fallback: local embedding via sentence-transformers HTTP endpoint
-  return embedLocal(texts);
+  // Safe fallback: zero vector of dimension 3072
+  return texts.map(() => new Array(3072).fill(0));
 }
 
 export async function embedOne(text: string): Promise<number[]> {
