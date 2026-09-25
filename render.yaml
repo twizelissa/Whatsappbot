@@ -7,13 +7,15 @@ services:
     healthCheckPath: /health
     envVars:
       - key: LLM_PROVIDER
-        value: gemini
+        value: openai
       - key: LLM_MODEL
-        value: gemini-1.5-flash
+        value: openrouter/free
+      - key: OPENAI_BASE_URL
+        value: https://openrouter.ai/api/v1
       - key: EMBEDDING_PROVIDER
         value: gemini
       - key: EMBEDDING_MODEL
-        value: text-embedding-004
+        value: gemini-embedding-001
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_KEY
@@ -21,4 +23,6 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: GEMINI_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
         sync: false
