@@ -22,6 +22,7 @@ const envSchema = z.object({
 
   // LLM
   OPENAI_API_KEY: z.string().optional().transform(v => v || undefined),
+  OPENAI_BASE_URL: z.string().optional().transform(v => v || undefined),
   ANTHROPIC_API_KEY: z.string().optional().transform(v => v || undefined),
   GEMINI_API_KEY: z.string().optional().transform(v => v || undefined),
   LLM_PROVIDER: z.enum(['openai', 'anthropic', 'gemini']).default('gemini'),
