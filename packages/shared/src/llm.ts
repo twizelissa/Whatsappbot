@@ -79,6 +79,59 @@ const ALLOWED_EMOJIS = new Set([
   '😂', '😤', '🔥', '🥳', '🙆🏽‍♀️', '👏🏽', '🤗', '😉', '🤔', '🤣', '🙏', '😎', '🤷🏽‍♀️', '🤷‍♀️', '😁', '😅', '😭', '🤫', '🫡'
 ]);
 
+export async function callUnifiedLLM(userPrompt: string, systemPrompt?: string): Promise<string> {
+  const env = getEnv();
+  const errors: string[] = [];
+
+  const providers = env.LLM_PROVIDER === 'gemini' 
+    ? ['gemini', 'openai', 'anthropic'] 
+    : (env.LLM_PROVIDER === 'openai' ? ['openai', 'gemini', 'anthropic'] : ['anthropic', 'gemini', 'openai']);
+
+  for (const provider of providers) {
+    if (provider === 'gemini' && env.GEMINI_API_KEY) {
+      try {
+        return await callGeminiContent(userPrompt, systemPrompt);
+      } catch (err) {
+        errors.push(`Gemini: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    if (provider === 'openai' && env.OPENAI_API_KEY) {
+      try {
+        const completion = await getOpenAI().chat.completions.create({
+          model: env.LLM_MODEL || 'gpt-4o-mini',
+          max_tokens: 1024,
+          messages: [
+            ...(systemPrompt ? [{ role: 'system' as const, content: systemPrompt }] : []),
+            { role: 'user' as const, content: userPrompt },
+          ],
+        });
+        const text = completion.choices[0]?.message?.content;
+        if (text) return text;
+      } catch (err) {
+        errors.push(`OpenAI: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    if (provider === 'anthropic' && env.ANTHROPIC_API_KEY) {
+      try {
+        const msg = await getAnthropic().messages.create({
+          model: env.LLM_MODEL || 'claude-3-5-sonnet-20240620',
+          max_tokens: 1024,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: userPrompt }],
+        });
+        const text = msg.content[0].type === 'text' ? msg.content[0].text : '';
+        if (text) return text;
+      } catch (err) {
+        errors.push(`Anthropic: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+
+  throw new Error(`All configured API providers failed: ${errors.join(' | ')}`);
+}
+
 export function filterAllowedEmojis(text: string): string {
   if (!text) return text;
   const emojiRegex = /(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])(\ud83c[\udffb-\udfff])?(\u200d[\u2000-\u3300]|\u200d\ud83c[\ud000-\udfff]|\u200d\ud83d[\ud000-\udfff]|\u200d\ud83e[\ud000-\udfff])*/g;
@@ -217,29 +270,7 @@ ${contextStr}${webSearchStr}${duplicateNote}
 
 Please answer the question accurately based on group context or web search results above.`;
 
-  let answer: string;
-
-  if (env.LLM_PROVIDER === 'anthropic') {
-    const msg = await getAnthropic().messages.create({
-      model: env.LLM_MODEL,
-      max_tokens: 1024,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: userPrompt }],
-    });
-    answer = msg.content[0].type === 'text' ? msg.content[0].text : '';
-  } else if (env.LLM_PROVIDER === 'gemini') {
-    answer = await callGeminiContent(userPrompt, SYSTEM_PROMPT);
-  } else {
-    const completion = await getOpenAI().chat.completions.create({
-      model: env.LLM_MODEL,
-      max_tokens: 1024,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: userPrompt },
-      ],
-    });
-    answer = completion.choices[0]?.message?.content ?? '';
-  }
+  let answer = await callUnifiedLLM(userPrompt, SYSTEM_PROMPT);
 
   // Filter emojis to strictly enforce allowed list
   answer = filterAllowedEmojis(answer);
@@ -298,27 +329,7 @@ Please create a concise digest summary suitable for WhatsApp. Include:
 
 Keep it brief and scannable. Format for WhatsApp (no markdown headers).`;
 
-  if (env.LLM_PROVIDER === 'anthropic') {
-    const msg = await getAnthropic().messages.create({
-      model: env.LLM_MODEL,
-      max_tokens: 1024,
-      system: 'You are a helpful group chat digest creator. Be concise and scannable.',
-      messages: [{ role: 'user', content: prompt }],
-    });
-    return msg.content[0].type === 'text' ? msg.content[0].text : '';
-  } else if (env.LLM_PROVIDER === 'gemini') {
-    return await callGeminiContent(prompt, 'You are a helpful group chat digest creator. Be concise and scannable.');
-  } else {
-    const completion = await getOpenAI().chat.completions.create({
-      model: env.LLM_MODEL,
-      max_tokens: 1024,
-      messages: [
-        { role: 'system', content: 'You are a helpful group chat digest creator. Be concise and scannable.' },
-        { role: 'user', content: prompt },
-      ],
-    });
-    return completion.choices[0]?.message?.content ?? '';
-  }
+  return await callUnifiedLLM(prompt, 'You are a helpful group chat digest creator. Be concise and scannable.');
 }
 
 /**
@@ -328,8 +339,6 @@ export async function generateCallRecap(
   chunks: RetrievedChunk[],
   callId: string
 ): Promise<string> {
-  const env = getEnv();
-
   const transcriptText = chunks
     .map((c) => {
       const meta = c.metadata as ChunkMetadata;
@@ -351,27 +360,7 @@ Please create a concise call recap for the WhatsApp group. Include:
 
 Format for WhatsApp. Be brief.`;
 
-  if (env.LLM_PROVIDER === 'anthropic') {
-    const msg = await getAnthropic().messages.create({
-      model: env.LLM_MODEL,
-      max_tokens: 800,
-      system: 'You are creating a call recap for a WhatsApp group. Be concise.',
-      messages: [{ role: 'user', content: prompt }],
-    });
-    return msg.content[0].type === 'text' ? msg.content[0].text : '';
-  } else if (env.LLM_PROVIDER === 'gemini') {
-    return await callGeminiContent(prompt, 'You are creating a call recap for a WhatsApp group. Be concise.');
-  } else {
-    const completion = await getOpenAI().chat.completions.create({
-      model: env.LLM_MODEL,
-      max_tokens: 800,
-      messages: [
-        { role: 'system', content: 'You are creating a call recap for a WhatsApp group. Be concise.' },
-        { role: 'user', content: prompt },
-      ],
-    });
-    return completion.choices[0]?.message?.content ?? '';
-  }
+  return await callUnifiedLLM(prompt, 'You are creating a call recap for a WhatsApp group. Be concise.');
 }
 
 /**
@@ -382,8 +371,6 @@ export async function generateCatchUp(
   chunks: RetrievedChunk[],
   userName?: string
 ): Promise<CatchUpResult> {
-  const env = getEnv();
-
   const contextStr = chunks
     .map((c) => {
       const meta = c.metadata as ChunkMetadata;
@@ -419,28 +406,7 @@ Return a valid JSON object matching this structure (no markdown formatting aroun
   ]
 }`;
 
-  let rawJson = '';
-  if (env.LLM_PROVIDER === 'gemini') {
-    rawJson = await callGeminiContent(prompt, 'Output strictly raw JSON without markdown code fences.');
-  } else if (env.LLM_PROVIDER === 'anthropic') {
-    const msg = await getAnthropic().messages.create({
-      model: env.LLM_MODEL,
-      max_tokens: 1200,
-      system: 'Output strictly raw JSON without markdown code fences.',
-      messages: [{ role: 'user', content: prompt }],
-    });
-    rawJson = msg.content[0].type === 'text' ? msg.content[0].text : '';
-  } else {
-    const completion = await getOpenAI().chat.completions.create({
-      model: env.LLM_MODEL,
-      max_tokens: 1200,
-      messages: [
-        { role: 'system', content: 'Output strictly raw JSON without markdown code fences.' },
-        { role: 'user', content: prompt },
-      ],
-    });
-    rawJson = completion.choices[0]?.message?.content ?? '';
-  }
+  let rawJson = await callUnifiedLLM(prompt, 'Output strictly raw JSON without markdown code fences.');
 
   try {
     const cleaned = rawJson.replace(/```json/gi, '').replace(/```/g, '').trim();
@@ -466,8 +432,6 @@ export async function generateMeetingIntelligence(
   callId: string,
   chunks: RetrievedChunk[]
 ): Promise<MeetingIntelligenceResult> {
-  const env = getEnv();
-
   const transcriptStr = chunks
     .map((c) => {
       const meta = c.metadata as ChunkMetadata;
@@ -494,20 +458,7 @@ Return a valid JSON object matching this structure (no markdown fences):
   "speaker_mentions": [{ "speaker": "Name", "count": 1 }]
 }`;
 
-  let rawJson = '';
-  if (env.LLM_PROVIDER === 'gemini') {
-    rawJson = await callGeminiContent(prompt, 'Output strictly raw JSON without markdown code fences.');
-  } else {
-    const completion = await getOpenAI().chat.completions.create({
-      model: env.LLM_MODEL,
-      max_tokens: 1000,
-      messages: [
-        { role: 'system', content: 'Output strictly raw JSON without markdown code fences.' },
-        { role: 'user', content: prompt },
-      ],
-    });
-    rawJson = completion.choices[0]?.message?.content ?? '';
-  }
+  let rawJson = await callUnifiedLLM(prompt, 'Output strictly raw JSON without markdown code fences.');
 
   try {
     const cleaned = rawJson.replace(/```json/gi, '').replace(/```/g, '').trim();
@@ -537,7 +488,6 @@ export async function detectGroupConfusion(
     return { is_confused: false, confidence: 0 };
   }
 
-  const env = getEnv();
   const textBlock = recentMessages
     .map((m) => `${m.sender_name}: ${m.text}`)
     .join('\n');
@@ -558,21 +508,7 @@ Return JSON only (no markdown fences):
 }`;
 
   try {
-    let raw = '';
-    if (env.LLM_PROVIDER === 'gemini') {
-      raw = await callGeminiContent(prompt, 'Output JSON only.');
-    } else {
-      const completion = await getOpenAI().chat.completions.create({
-        model: env.LLM_MODEL,
-        max_tokens: 300,
-        messages: [
-          { role: 'system', content: 'Output JSON only.' },
-          { role: 'user', content: prompt },
-        ],
-      });
-      raw = completion.choices[0]?.message?.content ?? '';
-    }
-
+    const raw = await callUnifiedLLM(prompt, 'Output JSON only.');
     const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
     return JSON.parse(cleaned) as ConfusionAssessment;
   } catch (err) {
