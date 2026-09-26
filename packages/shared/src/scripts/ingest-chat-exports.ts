@@ -196,10 +196,11 @@ export async function ingestPdfDocuments(folderPath: string, groupId: string) {
             [
               chunkId,
               chunkId,
-              'document',
+              'transcript', // Complies with PostgreSQL CHECK (source_type IN ('message', 'transcript'))
               chunkText,
               toVectorString(embedding),
               JSON.stringify({
+                is_document: true,
                 source_type: 'document',
                 file_name: fileName,
                 group_id: groupId,
