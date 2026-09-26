@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
 import getEnv from './config';
 import {
   RetrievedChunk,
@@ -54,16 +54,26 @@ export async function callGeminiContent(prompt: string, systemInstruction?: stri
   const env = getEnv();
   const candidateModels = ['gemini-2.5-flash'];
 
+  const safetySettings = [
+    { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+    { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+    { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+    { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+  ];
+
   let lastError: unknown = null;
   for (const modelName of candidateModels) {
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         const model = getGemini().getGenerativeModel({
           model: modelName,
+          safetySettings,
           ...(systemInstruction ? { systemInstruction } : {}),
         });
         const result = await model.generateContent(prompt);
-        return result.response.text();
+        let text = result.response.text();
+        text = text.replace(/(?:user\s*safety\s*:\s*\w+|safetyRatings\s*:\s*\[[\s\S]*?\])/gi, '').trim();
+        return text;
       } catch (err) {
         lastError = err;
         const errStr = String(err);
@@ -148,6 +158,9 @@ export function stripThinkingProcess(text: string): string {
 
   // 3. Remove Meta-Commentary lines (e.g. "@Elissa Here, the user gave me a lot of context, and then said...")
   cleaned = cleaned.replace(/^(@\w+\s*\n*)?(Here,?\s+the\s+user|The\s+user\s+gave\s+me|The\s+user\s+asked|In\s+this\s+prompt)[^\n]*\n*/gi, '');
+
+  // 4. Remove safety metadata string leaks (e.g. "user safety : safe")
+  cleaned = cleaned.replace(/(?:user\s*safety\s*:\s*\w+|safetyRatings\s*:\s*\[[\s\S]*?\])/gi, '').trim();
 
   // Remove surrounding quotes if whole output was quoted
   return cleaned.replace(/^"([\s\S]+)"$/, '$1').trim();
