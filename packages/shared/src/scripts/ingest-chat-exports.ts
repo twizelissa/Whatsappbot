@@ -150,6 +150,76 @@ async function embedWithRetry(text: string, retries = 5, delay = 2500): Promise<
   return await embedOne(text);
 }
 
+export async function ingestPdfDocuments(folderPath: string, groupId: string) {
+  if (!fs.existsSync(folderPath)) return;
+  const files = fs.readdirSync(folderPath).filter((f) => f.endsWith('.pdf'));
+  const { execSync } = require('child_process');
+
+  for (const fileName of files) {
+    const filePath = path.join(folderPath, fileName);
+    console.log(`\n📄 Parsing PDF Resource: "${fileName}" in ${groupId}...`);
+    try {
+      const fullText = execSync(`pdftotext "${filePath}" -`, { encoding: 'utf-8' });
+      if (!fullText || fullText.trim().length < 20) {
+        console.warn(`  ⚠️ Skipped empty or unparseable PDF: ${fileName}`);
+        continue;
+      }
+
+      const paragraphs = fullText.split(/\n\s*\n/);
+      const chunks: string[] = [];
+      let currentChunk = `=== DOCUMENT: ${fileName} | Group: ${groupId} ===\n`;
+
+      for (const p of paragraphs) {
+        const clean = p.trim();
+        if (!clean) continue;
+        if ((currentChunk + '\n' + clean).length > 800) {
+          chunks.push(currentChunk);
+          currentChunk = `=== DOCUMENT: ${fileName} | Group: ${groupId} ===\n` + clean;
+        } else {
+          currentChunk += '\n' + clean;
+        }
+      }
+      if (currentChunk.trim().length > 50) {
+        chunks.push(currentChunk);
+      }
+
+      console.log(`  └─ Created ${chunks.length} document chunks for "${fileName}".`);
+
+      let docEmbedded = 0;
+      for (const chunkText of chunks) {
+        try {
+          const embedding = await embedWithRetry(chunkText);
+          const chunkId = uuidv4();
+          await query(
+            `INSERT INTO chunks (id, source_id, source_type, text, embedding, metadata)
+             VALUES ($1, $2, $3, $4, $5::vector, $6)`,
+            [
+              chunkId,
+              chunkId,
+              'document',
+              chunkText,
+              toVectorString(embedding),
+              JSON.stringify({
+                source_type: 'document',
+                file_name: fileName,
+                group_id: groupId,
+                date: new Date().toISOString(),
+              }),
+            ]
+          );
+          docEmbedded++;
+          await new Promise((r) => setTimeout(r, 200));
+        } catch (e) {
+          console.error(`  ⚠️ Error embedding PDF chunk:`, e);
+        }
+      }
+      console.log(`  ✅ Successfully ingested "${fileName}": ${docEmbedded} chunks embedded.`);
+    } catch (err) {
+      console.error(`  ❌ Failed to parse PDF "${fileName}":`, err);
+    }
+  }
+}
+
 export async function runIngestion() {
   const rootDir = path.resolve(__dirname, '../../../../');
   const groupsToIngest = [
@@ -170,10 +240,16 @@ export async function runIngestion() {
     },
   ];
 
-  console.log('🚀 Starting Robust Chat Export Ingestion Pipeline...');
+  console.log('🚀 Starting Robust Chat Export & PDF Document Ingestion Pipeline...');
 
   for (const group of groupsToIngest) {
-    console.log(`\n📁 Processing "${group.groupId}" from ${group.file}`);
+    const folderPath = path.join(rootDir, group.folder);
+
+    // 1. Ingest PDF Documents in group folder
+    await ingestPdfDocuments(folderPath, group.groupId);
+
+    // 2. Ingest Chat Exports
+    console.log(`\n📁 Processing chat export "${group.groupId}" from ${group.file}`);
     if (!fs.existsSync(group.file)) {
       console.error(`❌ File not found: ${group.file}`);
       continue;
@@ -182,7 +258,6 @@ export async function runIngestion() {
     const messages = parseChatExport(group.file, group.groupId);
     console.log(`  └─ Parsed ${messages.length} total messages.`);
 
-    // 1. Insert messages into raw messages table in batches of 100
     const BATCH_SIZE = 100;
     for (let i = 0; i < messages.length; i += BATCH_SIZE) {
       const batch = messages.slice(i, i + BATCH_SIZE);
@@ -212,7 +287,6 @@ export async function runIngestion() {
     }
     console.log(`  └─ Inserted ${messages.length} raw messages to DB (batched).`);
 
-    // 2. Generate and embed conversational chunks
     const chunks = createChunksFromMessages(messages, group.groupId, 12, 3);
     console.log(`  └─ Created ${chunks.length} text chunks for vector embedding.`);
 
@@ -245,7 +319,7 @@ export async function runIngestion() {
     console.log(`  ✅ Finished "${group.groupId}": ${embeddedCount} chunks stored with embeddings.`);
   }
 
-  console.log('\n🎉 ALL HISTORICAL CHAT EXPORTS HAVE BEEN SUCCESSFULLY INGESTED AND EMBEDDED!');
+  console.log('\n🎉 ALL HISTORICAL CHATS AND PDF DOCUMENTS HAVE BEEN SUCCESSFULLY INGESTED AND EMBEDDED!');
   process.exit(0);
 }
 
