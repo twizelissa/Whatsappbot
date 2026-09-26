@@ -163,6 +163,11 @@ export async function runIngestion() {
       file: path.join(rootDir, 'UniPods METI AI Program 2026 Cohort', 'chat.txt'),
       groupId: 'UniPods METI AI Program 2026 Cohort',
     },
+    {
+      folder: 'Wadhwani UniPod AI Program Africa',
+      file: path.join(rootDir, 'Wadhwani UniPod AI Program Africa', 'chat.txt'),
+      groupId: 'Wadhwani UniPod AI Program Africa',
+    },
   ];
 
   console.log('🚀 Starting Robust Chat Export Ingestion Pipeline...');

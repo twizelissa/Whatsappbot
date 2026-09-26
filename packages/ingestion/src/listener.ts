@@ -426,8 +426,8 @@ async function processMessage(
 
   // ── Explicit Zeus Activation / Deactivation Commands ───────────────────────
   if (isGroup && text) {
-    const isStartCmd = /^(zeus\s+start|@zeus\s+start|zeus\s+activate|activate\s+zeus|zeus\s+on)$/i.test(lowerText);
-    const isStopCmd = /^(zeus\s+stop|@zeus\s+stop|zeus\s+pause|pause\s+zeus|zeus\s+off)$/i.test(lowerText);
+    const isStartCmd = /^(zeus\s+start|@zeus\s+start|zues\s+start|@zues\s+start|zeus\s+activate|activate\s+zeus|zeus\s+on)$/i.test(lowerText);
+    const isStopCmd = /^(zeus\s+stop|@zeus\s+stop|zues\s+stop|@zues\s+stop|zeus\s+pause|pause\s+zeus|zeus\s+off)$/i.test(lowerText);
 
     if (isStartCmd) {
       let groupSubject = 'WhatsApp Group';
@@ -479,16 +479,22 @@ async function processMessage(
   // Check if group is active (either via zeus start, active_groups.json, or env GROUP_ID)
   const isGroupActive = activeGroupsMap.has(jid) || (env.GROUP_ID && env.GROUP_ID.includes(jid));
 
-  // Zeus Bot Mention / Tag Detection
+  // Zeus Bot Mention / Tag / Reply Detection
   const botPhone = env.WHATSAPP_PHONE_NUMBER_ID;
+  const isReplyToZeus = !!(replyTo && sentMessageIds.has(replyTo));
   const isMentionedBot =
     text &&
     (
       lowerText.includes('zeus') ||
+      lowerText.includes('zues') ||
       lowerText.includes('@zeus') ||
+      lowerText.includes('@zues') ||
       lowerText.includes('zeus_bot') ||
+      lowerText.includes('zues_bot') ||
       lowerText.includes('@zeus_bot') ||
+      lowerText.includes('@zues_bot') ||
       lowerText.includes('@bot') ||
+      isReplyToZeus ||
       (botPhone && text.includes(`@${botPhone}`)) ||
       (msgContent.extendedTextMessage?.contextInfo?.mentionedJid ?? []).some(
         (id) => botPhone && id.replace('@s.whatsapp.net', '') === botPhone

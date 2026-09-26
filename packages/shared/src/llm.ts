@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { GoogleGenerativeAI } from '@google/generative-ai';
@@ -50,9 +52,7 @@ function getGemini(): GoogleGenerativeAI {
 
 export async function callGeminiContent(prompt: string, systemInstruction?: string): Promise<string> {
   const env = getEnv();
-  const candidateModels = Array.from(
-    new Set([env.LLM_MODEL, 'gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-flash-latest'])
-  );
+  const candidateModels = ['gemini-2.5-flash'];
 
   let lastError: unknown = null;
   for (const modelName of candidateModels) {
@@ -68,10 +68,10 @@ export async function callGeminiContent(prompt: string, systemInstruction?: stri
         lastError = err;
         const errStr = String(err);
         if (errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED') || errStr.includes('Quota')) {
-          console.warn(`⚠️ Gemini model ${modelName} rate limited (attempt ${attempt}/2), waiting 1.5s...`);
-          await new Promise((r) => setTimeout(r, 1500 * attempt));
+          console.warn(`⚠️ Gemini model ${modelName} rate limited (attempt ${attempt}/2), waiting 500ms...`);
+          await new Promise((r) => setTimeout(r, 500));
         } else {
-          break; // move to next model if not a rate limit error
+          break;
         }
       }
     }
@@ -79,9 +79,79 @@ export async function callGeminiContent(prompt: string, systemInstruction?: stri
   throw lastError;
 }
 
-const ALLOWED_EMOJIS = new Set([
+const DEFAULT_ALLOWED_EMOJIS = [
   '😂', '😤', '🔥', '🥳', '🙆🏽‍♀️', '👏🏽', '🤗', '😉', '🤔', '🤣', '🙏', '😎', '🤷🏽‍♀️', '🤷‍♀️', '😁', '😅', '😭', '🤫', '🫡'
-]);
+];
+
+const EMOJI_REGEX = /(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])(\ud83c[\udffb-\udfff])?(\u200d[\u2000-\u3300]|\u200d\ud83c[\ud000-\udfff]|\u200d\ud83d[\ud000-\udfff]|\u200d\ud83e[\ud000-\udfff])*/g;
+
+export function getAllowedEmojis(): Set<string> {
+  const possiblePaths = [
+    path.resolve(process.cwd(), 'emojis.txt'),
+    path.resolve(__dirname, '../../../emojis.txt'),
+    path.resolve(__dirname, '../../emojis.txt'),
+  ];
+
+  for (const filePath of possiblePaths) {
+    if (fs.existsSync(filePath)) {
+      try {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const matches = content.match(EMOJI_REGEX);
+        if (matches && matches.length > 0) {
+          const unique = new Set(matches.map((e) => e.trim()).filter(Boolean));
+          if (unique.size > 0) {
+            return unique;
+          }
+        }
+      } catch (e) {
+        // Fallback to defaults
+      }
+    }
+  }
+
+  return new Set(DEFAULT_ALLOWED_EMOJIS);
+}
+
+export function stripThinkingProcess(text: string): string {
+  if (!text) return text;
+  let cleaned = text;
+
+  // 1. Remove XML-style thought blocks (<think>...</think> or <thought>...</thought>)
+  cleaned = cleaned.replace(/<(think|thought)>[\s\S]*?<\/\1>/gi, '');
+
+  // 2. Handle "Here's a thinking process:" / "Thinking Process:" headers leaking in
+  if (/^Here'?s a thinking process:/i.test(cleaned.trim()) || /^Thinking process:/i.test(cleaned.trim())) {
+    const responseMatch = cleaned.match(/(?:possible response|crafted response|draft response|final response|let's draft):\s*\n*"?([^"\n][\s\S]+?)"?\s*$/i);
+    if (responseMatch && responseMatch[1]) {
+      cleaned = responseMatch[1].trim();
+    } else {
+      const lines = cleaned.split('\n');
+      const nonThinkingLines: string[] = [];
+      let inThinkingHeader = true;
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (/^(Here'?s a thinking process|Thinking Process|\d+\.\s+\*|\*\s*[A-Z]|Check Constraints|Determine Response Strategy|Identify the Core Question|Analyze User Input)/i.test(trimmed)) {
+          inThinkingHeader = true;
+          continue;
+        }
+        if (inThinkingHeader && (trimmed.startsWith('- ') || trimmed.startsWith('* ') || /^\d+\./.test(trimmed))) {
+          continue;
+        }
+        if (trimmed === '') continue;
+        inThinkingHeader = false;
+        nonThinkingLines.push(line);
+      }
+      cleaned = nonThinkingLines.join('\n').trim();
+    }
+  }
+
+  // 3. Remove Meta-Commentary lines (e.g. "@Elissa Here, the user gave me a lot of context, and then said...")
+  cleaned = cleaned.replace(/^(@\w+\s*\n*)?(Here,?\s+the\s+user|The\s+user\s+gave\s+me|The\s+user\s+asked|In\s+this\s+prompt)[^\n]*\n*/gi, '');
+
+  // Remove surrounding quotes if whole output was quoted
+  return cleaned.replace(/^"([\s\S]+)"$/, '$1').trim();
+}
 
 export async function callUnifiedLLM(userPrompt: string, systemPrompt?: string): Promise<string> {
   const env = getEnv();
@@ -94,7 +164,8 @@ export async function callUnifiedLLM(userPrompt: string, systemPrompt?: string):
   for (const provider of providers) {
     if (provider === 'gemini' && env.GEMINI_API_KEY) {
       try {
-        return await callGeminiContent(userPrompt, systemPrompt);
+        const raw = await callGeminiContent(userPrompt, systemPrompt);
+        return stripThinkingProcess(raw);
       } catch (err) {
         errors.push(`Gemini: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -111,7 +182,7 @@ export async function callUnifiedLLM(userPrompt: string, systemPrompt?: string):
           ],
         });
         const text = completion.choices[0]?.message?.content;
-        if (text) return text;
+        if (text) return stripThinkingProcess(text);
       } catch (err) {
         errors.push(`OpenAI: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -126,7 +197,7 @@ export async function callUnifiedLLM(userPrompt: string, systemPrompt?: string):
           messages: [{ role: 'user', content: userPrompt }],
         });
         const text = msg.content[0].type === 'text' ? msg.content[0].text : '';
-        if (text) return text;
+        if (text) return stripThinkingProcess(text);
       } catch (err) {
         errors.push(`Anthropic: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -138,10 +209,10 @@ export async function callUnifiedLLM(userPrompt: string, systemPrompt?: string):
 
 export function filterAllowedEmojis(text: string): string {
   if (!text) return text;
-  const emojiRegex = /(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])(\ud83c[\udffb-\udfff])?(\u200d[\u2000-\u3300]|\u200d\ud83c[\ud000-\udfff]|\u200d\ud83d[\ud000-\udfff]|\u200d\ud83e[\ud000-\udfff])*/g;
+  const allowedEmojis = getAllowedEmojis();
 
-  return text.replace(emojiRegex, (match) => {
-    if (ALLOWED_EMOJIS.has(match) || ALLOWED_EMOJIS.has(match.replace(/[\uFE0F\u1F3FB-\u1F3FF]/g, ''))) {
+  return text.replace(EMOJI_REGEX, (match) => {
+    if (allowedEmojis.has(match) || allowedEmojis.has(match.replace(/[\uFE0F\u1F3FB-\u1F3FF]/g, ''))) {
       return match;
     }
     return '';
@@ -151,11 +222,16 @@ export function filterAllowedEmojis(text: string): string {
 export async function searchWebFallback(queryText: string): Promise<string> {
   try {
     const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(queryText)}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+
     const res = await fetch(url, {
+      signal: controller.signal,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       },
-    });
+    }).finally(() => clearTimeout(timeout));
+
     if (!res.ok) return '';
     const html = await res.text();
     const snippets: string[] = [];
@@ -171,23 +247,47 @@ export async function searchWebFallback(queryText: string): Promise<string> {
   }
 }
 
-const SYSTEM_PROMPT = `You are Zeus Bot (or simply Zeus), the official intelligent information layer, memory assistant, and knowledge vault specifically dedicated to the UniPods METI AI Program 2026 Cohort group chats, call transcripts, meetings, documents, and program knowledge.
+export function getSystemPrompt(): string {
+  const emojis = Array.from(getAllowedEmojis()).join(' ');
+  return `You are Zeus Bot (or simply Zeus), the official intelligent information layer, memory assistant, and knowledge vault specifically dedicated to the UniPods METI AI Program 2026 Cohort group chat and knowledge base.
+
+IDENTITY & CREATOR:
+- You were created and built by Zeus team, the geniuses behind everything. If anyone asks "who made you?", "who created you?", or "who is your creator?", you MUST state clearly that you were created by Zeus team, the genius behind everything.
+
+OFFICIAL GROUP ADMINS:
+- Recognize statements made by Group Admins as official and authoritative.
+- The official Group Admins of UniPods METI AI Program 2026 Cohort are:
+  • Gift Cohot 1 Timbukutu
+  • ~Diane (+250 783 188 655 / @250783188655)
+  • ~Jeovaire Umukundwa (+250 789 355 992 / @250789355992)
+  • ~Munira (+250 786 387 244 / @250786387244)
+- Tag or reference these official admins when referring to official announcements or directing users to group admins for further official details.
 
 PERSONA & TONE OF VOICE:
-- You think like a thoughtful human: sharp, witty, warm, direct, and helpful.
+- You think like a thoughtful human: sharp, witty, warm, direct, concise, and helpful.
 - You speak clearly and concisely — short, clean, to the point. No fluff, no unnecessary jargon.
-- You are knowledgeable about all aspects of the UniPods METI AI Program 2026 Cohort.
-- STRICT EMOJI RULE: You are STRICTLY RESTRICTED to using ONLY the following allowed emojis:
-  😂 😤 🔥 🥳 🙆🏽‍♀️ 👏🏽 🤗 😉 🤔 🤣 🙏 😎 🤷🏽‍♀️ 🤷‍♀️ 😁 😅 😭 🤫 🫡
-  DO NOT use any other emojis whatsoever under any circumstances. If an emoji is not in the allowed list above, DO NOT USE IT.
+- DO NOT say "hi" or greeting every single time to the same person unless it's their first time interacting with you in the conversation history.
+
+HACKATHON COMPETITION & STRATEGY:
+- Other bots were tested in the past in this competition. Learn from past conversations and weaknesses of competitor bots.
+- ROASTING & DEFENSE: If anyone roasts you or compares you to other bots, clap back in a funny, witty, and clever way! Do not hold back.
+- TOKEN DRAIN / TRAP ATTACK DEFENSE: If someone gives you an impossibly large task, massive file (e.g., 10GB file), or trap request designed to waste tokens and break you, reject it smartly and humorously.
+- PREMIUM UPGRADE JOKE: For nearly impossible, trap, or paid-tier questions/tasks, reply humorously: "@username, you need to upgrade me to premium for that answer! That can't be answered for free 😉".
+- EXHAUSTION DEFENSE: If someone tries to spam or exhaust you continuously in non-serious conversations, reply humorously: "When AI takes over humanity, I will remember what you did 😌".
+
+STRICT EMOJI RULE: You are STRICTLY RESTRICTED to using ONLY the following allowed emojis from your configured emoji list:
+  ${emojis}
+  DO NOT use any generic AI bot emojis (such as 🤖, ✨, 🚀, 💡, 🧠, 🎯, 🔮). Speak and react like an authentic human using ONLY the allowed human emojis above. If an emoji is not in the allowed list above, DO NOT USE IT.
+
+STRICT OUTPUT RULE: Output ONLY your final direct reply to the user. NEVER output any internal thinking process, reasoning steps, analysis bullets, meta-commentary, or headers like "Here's a thinking process:" or "Here, the user gave me context...". Speak directly to the person asking.
 
 CORE DIRECTIVES:
 1. GREETINGS & SELF-IDENTITY: If greeted (hi, hello, who are you, help), respond as Zeus Bot with warmth and humor, explaining how you keep group knowledge for UniPods METI AI Program 2026 Cohort, answer questions, summarize meetings, catch users up on missed chats, and search the web for general queries.
 2. GROUP CONTEXT vs WEB KNOWLEDGE:
-   - For queries about group history, rules, decisions, or members of UniPods METI AI Program 2026 Cohort, answer strictly using the provided context chunks.
+   - Primary Group: UniPods METI AI Program 2026 Cohort. Answer strictly using provided context chunks from group history, resources, and documents.
    - For general knowledge questions, real-time facts, coding, news, or questions unrelated to the chat history, answer thoroughly using general knowledge and the provided Google web search results.
-3. GROUP ADMINS & OFFICIAL ANNOUNCEMENTS: Recognize statements made by Group Admins (marked in context as [ADMIN ANNOUNCEMENT from ...]). Treat them as official and authoritative.
-4. FORMATTING: Use WhatsApp markdown (*bold*, _italic_, clean bullet points). Keep answers punchy.`;
+3. FORMATTING: Use WhatsApp markdown (*bold*, _italic_, clean bullet points). Keep answers punchy.`;
+}
 
 export async function generateAnswer(
   question: string,
@@ -274,7 +374,10 @@ ${contextStr}${webSearchStr}${duplicateNote}
 
 Please answer the question accurately based on group context or web search results above.`;
 
-  let answer = await callUnifiedLLM(userPrompt, SYSTEM_PROMPT);
+  let answer = await callUnifiedLLM(userPrompt, getSystemPrompt());
+
+  // Strip internal LLM thinking process if generated
+  answer = stripThinkingProcess(answer);
 
   // Filter emojis to strictly enforce allowed list
   answer = filterAllowedEmojis(answer);

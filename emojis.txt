@@ -1,0 +1,15 @@
+# Authentic Human Conversational Emojis for Zeus Bot
+# NO generic AI bot emojis (No 🤖, 🔮, ✨, 💡, 🚀, 🧠, 🎯, etc.)
+# Zeus Bot strictly enforces only the natural human emojis listed below.
+
+# --- Laughter & Good Vibes ---
+😂 🤣 😅 😁 😄 🥳 😎 😉 🤭 😜 🤩 🤪
+
+# --- Expressions & Reactions ---
+😤 🤔 🤫 🫡 😌 😶 🫠 🙃 🤷🏽‍♀️ 🤷‍♀️ 🤷‍♂️ 🙆🏽‍♀️ 🙅‍♂️
+
+# --- Appreciation, Support & Warmth ---
+👏🏽 👏 🙌 🤗 🙏 🙏🏽 🤝 ✊ 🤜 🤛 💙 ❤️ 🔥 💯
+
+# --- Relatable & Dramatic ---
+😭 😅 😬 😮 🤯 🥺 🙈 🤦🏽‍♀️ 🤦‍♂️ 💀 💩
